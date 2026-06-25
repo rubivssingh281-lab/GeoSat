@@ -6,16 +6,22 @@ This project trains a simple deep learning retrieval system that matches SAR ima
 
 ```text
 .
-├── data/
-│   └── Paired_SAR_Optical_images/   # paired SAR/optical image files
-├── saved_model/
-│   ├── sar_encoder.pth              # trained SAR encoder weights
-│   ├── optical_encoder.pth          # trained optical encoder weights
-│   ├── optical_embeddings.pt        # cached optical embeddings
-│   └── optical_files.txt            # file order for cached embeddings
-├── train.py                         # trains SAR and optical encoders
-├── test_retrieval.py                # runs SAR-to-optical retrieval
-└── rquirements.txt                  # dependency file, currently empty
+├── data/                          # Dataset directory
+│   ├── SAR/                       # SAR images (optional)
+│   ├── Optical/                   # Optical images (optional)
+│   └── Paired_SAR_Optical_images/ # Paired images (alternative)
+├── saved_model/                   # Trained models and cache
+│   ├── sar_encoder.pth
+│   ├── optical_encoder.pth
+│   ├── optical_embeddings.pt
+│   └── optical_files.txt
+├── train.py                       # Training script
+├── test_retrieval.py              # CLI retrieval script
+├── flask_backend.py               # Flask API server
+├── index.html                     # Web UI frontend
+├── styles.css                     # Frontend styles
+├── requirements.txt               # Dependencies
+└── README.md
 ```
 
 The code supports either of these dataset layouts:
