@@ -65,7 +65,7 @@ body {
 /* ----- Layout: Sidebar + Main ----- */
 .app-layout {
     display: flex;
-    min-height: 840px;
+    min-height: 940px;
 }
 
 /* ----- Sidebar ----- */
