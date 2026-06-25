@@ -53,7 +53,7 @@ body {
 
 /* ----- App Container ----- */
 .app-container {
-    max-width: 1440px;
+    max-width: 1640px;
     width: 100%;
     background-color: #e9ecf0;
     border-radius: var(--border-radius-xl);
