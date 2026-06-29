@@ -5,476 +5,289 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>GeoSat Satellite Retrieval System</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.47.0/tabler-icons.min.css" />
-    <link rel="stylesheet" href="styles.css"/>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+        /* small extra styles for live integration */
+        .upload-area .file-name {
+            font-size: 13px;
+            color: var(--color-text-info);
+            font-weight: 500;
+            margin-top: 4px;
+        }
+        .upload-area .file-clear {
+            background: none;
+            border: none;
+            color: var(--color-text-danger);
+            cursor: pointer;
+            font-size: 14px;
+            margin-left: 6px;
+        }
+        .result-card .loading-placeholder {
+            color: var(--color-text-tertiary);
+            font-size: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+        .search-status.error {
+            color: var(--color-text-danger);
+            border-color: var(--color-text-danger);
+        }
+    </style>
 </head>
 <body>
-    <div class="app-container">
-        <div class="app-layout">
-            <!-- ===== SIDEBAR ===== -->
-            <nav class="sidebar">
-                <div class="sidebar-header">
-                    <div class="brand">
-                        <div class="brand-icon">
-                            <i class="ti ti-map" aria-hidden="true"></i>
+<div class="app-container">
+    <div class="app-layout">
+                        <!-- ===== sidebar ===== -->
+        <nav class="sidebar">
+            <div class="sidebar-header">
+                <div class="brand">
+                    <div class="brand-icon"><i class="ti ti-map" aria-hidden="true"></i></div>
+                    <div>
+                        <div class="brand-name">GeoSat</div>
+                        <div class="brand-version">Retrieval v2.1</div>
+                    </div>
+                </div>
+            </div>
+            <div class="sidebar-nav">
+                <button class="nav-btn active" data-page="search"><i class="ti ti-search" aria-hidden="true"></i> Search</button>
+                <button class="nav-btn" data-page="results"><i class="ti ti-layout-grid" aria-hidden="true"></i> Results</button>
+                <button class="nav-btn" data-page="viewer"><i class="ti ti-photo" aria-hidden="true"></i> Image viewer</button>
+                <button class="nav-btn" data-page="dash"><i class="ti ti-chart-bar" aria-hidden="true"></i> Dashboard</button>
+            </div>
+            <div class="sidebar-footer">
+                <div class="status-dot"></div>
+                <span class="status-text">Index online · 2.4M</span>
+            </div>
+        </nav>
+
+                                <!-- ===== MAIN ===== -->
+        <main class="main-content">
+
+                                <!-- Page: search -->
+            
+            <div class="page active" id="page-search">
+                <div class="page-header">
+                    <div class="page-label">Query interface</div>
+                    <h2 class="page-title">Search the archive</h2>
+                    <p class="page-desc">Upload a SAR image to find matching optical scenes.</p>
+                </div>
+
+                        <!-- Query tabs (keep for UI, but only image upload works) -->
+                <div class="query-tabs">
+                    <button class="query-tab" data-tab="text">Text query</button>
+                    <button class="query-tab active" data-tab="image">Image upload</button>
+                    <button class="query-tab" data-tab="map">Map region</button>
+                </div>
+
+                        <!-- Text query (disabled, kept as placeholder) -->
+                <textarea id="q-text" class="query-textarea" placeholder="Describe what you're looking for — text search is not yet supported; please use the image upload tab." disabled style="background:var(--color-background-tertiary);color:var(--color-text-tertiary);"></textarea>
+
+                        <!-- Image upload area -->
+                <div class="upload-area" id="uploadArea">
+                    <i class="ti ti-upload" aria-hidden="true"></i>
+                    <p>Drop a query image, or <span class="upload-link" id="browseLink">browse files</span></p>
+                    <p class="upload-hint">Enables image‑to‑image similarity search (SAR only)</p>
+                    <div id="fileInfo" style="display:none; margin-top:8px;">
+                        <span class="file-name" id="fileName"></span>
+                        <button class="file-clear" id="clearFileBtn" title="Clear selection">&times;</button>
+                    </div>
+                    <input type="file" id="fileInput" accept="image/*" style="display:none;" />
+                </div>
+
+                        <!-- Advanced filters (kept for UI, not connected) -->
+                <details class="filters-details">
+                    <summary class="filters-summary">
+                        <i class="ti ti-adjustments-horizontal" aria-hidden="true"></i>
+                        Advanced filters
+                        <i class="ti ti-chevron-down" aria-hidden="true"></i>
+                    </summary>
+                    <div class="filters-panel">
+                        <div class="filter-group">
+                            <div class="filter-label">Sensor type</div>
+                            <div class="filter-options">
+                                <label><input type="checkbox" checked /> Optical</label>
+                                <label><input type="checkbox" /> SAR</label>
+                                <label><input type="checkbox" /> Infrared</label>
+                            </div>
                         </div>
-                        <div>
-                            <div class="brand-name">GeoSat</div>
-                            <div class="brand-version">Retrieval v2.1</div>
+                        <div class="filter-group">
+                            <div class="filter-label">Date range</div>
+                            <div class="date-range">
+                                <input type="date" value="2024-01-01" />
+                                <span>→</span>
+                                <input type="date" value="2024-06-22" />
+                            </div>
+                        </div>
+                        <div class="filter-group">
+                            <div class="filter-label">Max cloud cover: <span id="cc-val">30%</span></div>
+                            <input type="range" min="0" max="100" value="30" step="1" class="cloud-slider" oninput="document.getElementById('cc-val').textContent=this.value+'%'" />
+                        </div>
+                        <button class="btn-clear-filters">Clear all filters</button>
+                    </div>
+                </details>
+
+                <!-- Search button -->
+                <button class="btn-search" id="searchBtn" onclick="doSearch()">
+                    <i class="ti ti-search" aria-hidden="true"></i> Search satellite archive
+                </button>
+
+                <!-- Search status -->
+                <div id="search-status" class="search-status" style="display:none;">
+                    <div class="status-lines">
+                        <span id="s1">▶ Encoding query vector...</span><br />
+                        <span id="s2">▶ Searching database...</span><br />
+                        <span id="s3">▶ Ranking by cosine similarity...</span>
+                    </div>
+                </div>
+            </div>
+
+
+                            <!-- Page: results -->
+            
+            <div class="page" id="page-results">
+                <div class="results-header">
+                    <div>
+                        <div class="results-query-label" id="resultsQueryLabel">Query · (not yet run)</div>
+                        <h2 class="results-title" id="resultsTitle">0 results found</h2>
+                        <div class="results-meta" id="resultsMeta">Waiting for a query...</div>
+                    </div>
+                    <div class="results-actions">
+                        <button class="btn-sm">Score ▾</button>
+                        <button class="btn-sm"><i class="ti ti-layout-grid" aria-hidden="true"></i></button>
+                    </div>
+                </div>
+
+                <!-- Card grid -->
+                <div id="card-grid" class="card-grid"></div>
+
+                <button class="btn-load-more" id="loadMoreBtn" style="display:none;">Load more results</button>
+            </div>
+
+            
+                            <!-- Page: image viewer -->
+
+            
+            <div class="page" id="page-viewer">
+                <button class="btn-back" onclick="navigateTo('results')">
+                    <i class="ti ti-arrow-left" aria-hidden="true"></i> Back to results
+                </button>
+
+                <div class="viewer-layout">
+                    <div class="viewer-image-area">
+                        <div id="vw-thumb" class="viewer-thumb">
+                            <div class="viewer-badge sensor" id="vw-sensor-badge">—</div>
+                            <div class="viewer-badge date" id="vw-date-badge">—</div>
+                            <div class="viewer-placeholder"><i class="ti ti-crosshair" aria-hidden="true"></i></div>
+                            <!-- We'll load the actual image dynamically -->
+                            <img id="vw-image" style="width:100%;height:100%;object-fit:cover;display:none;" alt="Optical image" />
+                        </div>
+                        <div class="viewer-actions">
+                            <button class="btn-primary" id="downloadBtn"><i class="ti ti-download" aria-hidden="true"></i> Download</button>
+                            <button class="btn-sm" id="findSimilarBtn"><i class="ti ti-copy" aria-hidden="true"></i> Find similar</button>
+                            <button class="btn-sm"><i class="ti ti-map" aria-hidden="true"></i> Open in map</button>
                         </div>
                     </div>
-                </div>
-                <div class="sidebar-nav">
-                    <button class="nav-btn active" data-page="search">
-                        <i class="ti ti-search" aria-hidden="true"></i> Search
-                    </button>
-                    <button class="nav-btn" data-page="results">
-                        <i class="ti ti-layout-grid" aria-hidden="true"></i> Results
-                    </button>
-                    <button class="nav-btn" data-page="viewer">
-                        <i class="ti ti-photo" aria-hidden="true"></i> Image viewer
-                    </button>
-                    <button class="nav-btn" data-page="dash">
-                        <i class="ti ti-chart-bar" aria-hidden="true"></i> Dashboard
-                    </button>
-                </div>
 
-                <div class="sidebar-footer">
-                    <div class="status-dot"></div>
-                    <span class="status-text">Index online · 2.4M</span>
-                </div>
-            </nav>
-            <!-- ===== MAIN CONTENT ===== -->
-            <main class="main-content">
-                <!-- ============================================================ -->
-                <!-- PAGE: SEARCH -->
-                <!-- ============================================================ -->
-                <div class="page active" id="page-search">
-                    <div class="page-header">
-                        <div class="page-label">Query interface</div>
-                        <h2 class="page-title">Search the archive</h2>
-                        <p class="page-desc">Query 2.4M+ indexed satellite images by text, image, or geography.</p>
-                    </div>
-
-                    <!-- Query tabs -->
-                    <div class="query-tabs">
-                        <button class="query-tab active" data-tab="text">Text query</button>
-                        <button class="query-tab" data-tab="image">Image upload</button>
-                        <button class="query-tab" data-tab="map">Map region</button>
-                    </div>
-
-                    <!-- Text query -->
-                    <textarea id="q-text" class="query-textarea" placeholder="Describe what you're looking for — e.g. 'flooded agricultural area near river delta' or 'urban heat island in dense metro'"></textarea>
-
-                    <!-- Image upload area -->
-                    <div class="upload-area">
-                        <i class="ti ti-upload" aria-hidden="true"></i>
-                        <p>Drop a query image, or <span class="upload-link">browse files</span></p>
-                        <p class="upload-hint">Enables image-to-image similarity search</p>
-                    </div>
-
-                    <!-- Advanced filters -->
-                    <details class="filters-details">
-                        <summary class="filters-summary">
-                            <i class="ti ti-adjustments-horizontal" aria-hidden="true"></i>
-                            Advanced filters
-                            <i class="ti ti-chevron-down" aria-hidden="true"></i>
-                        </summary>
-                        <div class="filters-panel">
-                            <div class="filter-group">
-                                <div class="filter-label">Sensor type</div>
-                                <div class="filter-options">
-                                    <label><input type="checkbox" checked /> Optical</label>
-                                    <label><input type="checkbox" /> SAR</label>
-                                    <label><input type="checkbox" /> Infrared</label>
+                    <div class="viewer-metadata">
+                        <div class="meta-card">
+                            <div id="vw-title" class="meta-title">Select a result</div>
+                            <div class="meta-score-label">Match score</div>
+                            <div class="meta-score-row">
+                                <div class="meta-score-bar">
+                                    <div id="vw-score-bar" class="meta-score-fill" style="width:0%;"></div>
                                 </div>
+                                <span id="vw-score-val" class="meta-score-value">—</span>
                             </div>
-                            <div class="filter-group">
-                                <div class="filter-label">Date range</div>
-                                <div class="date-range">
-                                    <input type="date" value="2024-01-01" />
-                                    <span>→</span>
-                                    <input type="date" value="2024-06-22" />
-                                </div>
-                            </div>
-                            <div class="filter-group">
-                                <div class="filter-label">Max cloud cover: <span id="cc-val">30%</span></div>
-                                <input type="range" min="0" max="100" value="30" step="1" class="cloud-slider" oninput="document.getElementById('cc-val').textContent=this.value+'%'" />
-                            </div>
-                            <button class="btn-clear-filters">Clear all filters</button>
                         </div>
-                    </details>
-
-                    <!-- Search button -->
-                    <button class="btn-search" onclick="doSearch()">
-                        <i class="ti ti-search" aria-hidden="true"></i> Search satellite archive
-                    </button>
-
-                    <!-- Search status -->
-                    <div id="search-status" class="search-status" style="display:none;">
-                        <div class="status-lines">
-                            <span id="s1">▶ Encoding query vector...</span><br />
-                            <span id="s2">▶ Searching FAISS index (2,418,293 vectors)...</span><br />
-                            <span id="s3">▶ Ranking by cosine similarity...</span>
+                        <div class="meta-card">
+                            <div class="meta-section-label">Basic info</div>
+                            <div class="meta-kv"><span class="meta-kv-key">Sensor</span><span id="md-sensor" class="meta-kv-value">—</span></div>
+                            <div class="meta-kv"><span class="meta-kv-key">Date</span><span id="md-date" class="meta-kv-value">—</span></div>
+                            <div class="meta-kv"><span class="meta-kv-key">Coordinates</span><span id="md-coords" class="meta-kv-value">—</span></div>
+                            <div class="meta-kv"><span class="meta-kv-key">Cloud cover</span><span id="md-cloud" class="meta-kv-value">—</span></div>
+                        </div>
+                        <div class="meta-card">
+                            <div class="meta-section-label">Technical</div>
+                            <div class="meta-kv"><span class="meta-kv-key">Resolution</span><span id="md-res" class="meta-kv-value">—</span></div>
+                            <div class="meta-kv"><span class="meta-kv-key">Process level</span><span class="meta-kv-value">L2A</span></div>
+                            <div class="meta-kv"><span class="meta-kv-key">Bands</span><span class="meta-kv-value">—</span></div>
+                            <div class="meta-kv"><span class="meta-kv-key">Source</span><span class="meta-kv-value link">Bhoonidhi <i class="ti ti-external-link" aria-hidden="true"></i></span></div>
                         </div>
                     </div>
                 </div>
+            </div>
 
-                <!-- ============================================================ -->
-                <!-- PAGE: RESULTS -->
-                <!-- ============================================================ -->
-                <div class="page" id="page-results">
-                    <div class="results-header">
-                        <div>
-                            <div class="results-query-label">Query · "flooded agricultural area"</div>
-                            <h2 class="results-title">6 results found</h2>
-                            <div class="results-meta">Retrieved in 0.24 s · sorted by similarity</div>
-                        </div>
-                        <div class="results-actions">
-                            <button class="btn-sm">Score ▾</button>
-                            <button class="btn-sm"><i class="ti ti-layout-grid" aria-hidden="true"></i></button>
-                        </div>
-                    </div>
 
-                    <!-- Card grid -->
-                    <div id="card-grid" class="card-grid"></div>
-
-                    <button class="btn-load-more">Load more results</button>
+                                    <!-- Page: Dashboard -->
+            
+            <div class="page" id="page-dash">
+                <div class="page-header">
+                    <div class="page-label">System dashboard</div>
+                    <h2 class="page-title">Backend status</h2>
                 </div>
 
-                <!-- ============================================================ -->
-                <!-- PAGE: IMAGE VIEWER -->
-                <!-- ============================================================ -->
-                <div class="page" id="page-viewer">
-                    <button class="btn-back" onclick="navigateTo('results')">
-                        <i class="ti ti-arrow-left" aria-hidden="true"></i> Back to results
-                    </button>
-
-                    <div class="viewer-layout">
-                        <!-- Image area -->
-                        <div class="viewer-image-area">
-                            <div id="vw-thumb" class="viewer-thumb">
-                                <div class="viewer-badge sensor" id="vw-sensor-badge">Sentinel-1</div>
-                                <div class="viewer-badge date" id="vw-date-badge">2024-05-15</div>
-                                <div class="viewer-placeholder">
-                                    <i class="ti ti-crosshair" aria-hidden="true"></i>
-                                </div>
-                            </div>
-                            <div class="viewer-actions">
-                                <button class="btn-primary"><i class="ti ti-download" aria-hidden="true"></i> Download</button>
-                                <button class="btn-sm"><i class="ti ti-copy" aria-hidden="true"></i> Find similar</button>
-                                <button class="btn-sm"><i class="ti ti-map" aria-hidden="true"></i> Open in map</button>
-                            </div>
-                        </div>
-
-                        <!-- Metadata panel -->
-                        <div class="viewer-metadata">
-                            <!-- Score card -->
-                            <div class="meta-card">
-                                <div id="vw-title" class="meta-title">Flooded agricultural area</div>
-                                <div class="meta-score-label">Match score</div>
-                                <div class="meta-score-row">
-                                    <div class="meta-score-bar">
-                                        <div id="vw-score-bar" class="meta-score-fill" style="width:94%;"></div>
-                                    </div>
-                                    <span id="vw-score-val" class="meta-score-value">94%</span>
-                                </div>
-                            </div>
-
-                            <!-- Basic info -->
-                            <div class="meta-card">
-                                <div class="meta-section-label">Basic info</div>
-                                <div class="meta-kv"><span class="meta-kv-key">Sensor</span><span id="md-sensor" class="meta-kv-value">Sentinel-1 SAR</span></div>
-                                <div class="meta-kv"><span class="meta-kv-key">Date</span><span id="md-date" class="meta-kv-value">2024-05-15</span></div>
-                                <div class="meta-kv"><span class="meta-kv-key">Coordinates</span><span id="md-coords" class="meta-kv-value">28.4°N, 77.1°E</span></div>
-                                <div class="meta-kv"><span class="meta-kv-key">Cloud cover</span><span id="md-cloud" class="meta-kv-value">0%</span></div>
-                            </div>
-
-                            <!-- Technical info -->
-                            <div class="meta-card">
-                                <div class="meta-section-label">Technical</div>
-                                <div class="meta-kv"><span class="meta-kv-key">Resolution</span><span id="md-res" class="meta-kv-value">10m</span></div>
-                                <div class="meta-kv"><span class="meta-kv-key">Process level</span><span class="meta-kv-value">L2A</span></div>
-                                <div class="meta-kv"><span class="meta-kv-key">Bands</span><span class="meta-kv-value">VV, VH</span></div>
-                                <div class="meta-kv"><span class="meta-kv-key">Source</span><span class="meta-kv-value link">Bhoonidhi <i class="ti ti-external-link" aria-hidden="true"></i></span></div>
-                            </div>
-                        </div>
+                <div class="stats-grid" id="dashboardStats">
+                    <div class="stat-card">
+                        <div class="stat-label">Images indexed</div>
+                        <div class="stat-value" id="dashIndexed">—</div>
+                        <div class="stat-hint">total vectors</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">FAISS index</div>
+                        <div class="stat-value" id="dashIndexStatus">Loading…</div>
+                        <div class="stat-hint">on disk</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Query encoder</div>
+                        <div class="stat-value" id="dashEncoder">—</div>
+                        <div class="stat-hint">PyTorch</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Avg query time</div>
+                        <div class="stat-value warning" id="dashQueryTime">—</div>
+                        <div class="stat-hint">p50 latency</div>
                     </div>
                 </div>
 
-                <!-- ============================================================ -->
-                <!-- PAGE: DASHBOARD -->
-                <!-- ============================================================ -->
-                <div class="page" id="page-dash">
-                    <div class="page-header">
-                        <div class="page-label">System dashboard</div>
-                        <h2 class="page-title">Backend status</h2>
-                    </div>
-
-                    <!-- Stats grid -->
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <div class="stat-label">Images indexed</div>
-                            <div class="stat-value">2.4M</div>
-                            <div class="stat-hint">total vectors</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">FAISS index</div>
-                            <div class="stat-value success">Loaded ✓</div>
-                            <div class="stat-hint">2.8 GB on disk</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Query encoder</div>
-                            <div class="stat-value">CLIP ViT-B/32</div>
-                            <div class="stat-hint">PyTorch 2.3</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Avg query time</div>
-                            <div class="stat-value warning">0.24s</div>
-                            <div class="stat-hint">p50 latency</div>
-                        </div>
-                    </div>
-
-                    <!-- Query log -->
-                    <div class="log-card">
-                        <div class="log-header">
-                            <i class="ti ti-player-play" aria-hidden="true"></i>
-                            Recent query log
-                        </div>
-                        <div class="log-grid">
-                            <div class="log-head">Time</div>
-                            <div class="log-head">Query</div>
-                            <div class="log-head">Results</div>
-                            <div class="log-head">Time</div>
-                            <div id="log-rows"></div>
-                            <div id="log-queries"></div>
-                            <div id="log-results"></div>
-                            <div id="log-times"></div>
-                        </div>
-                    </div>
-
-                    <!-- Bottom stats -->
-                    <div class="bottom-stats">
-                        <div class="stat-card">
-                            <div class="stat-label">Index details</div>
-                            <div class="meta-kv"><span class="meta-kv-key">Type</span><span class="meta-kv-value">FAISS IVF-PQ</span></div>
-                            <div class="meta-kv"><span class="meta-kv-key">Vector dim</span><span class="meta-kv-value">512</span></div>
-                            <div class="meta-kv"><span class="meta-kv-key">Num cells</span><span class="meta-kv-value">1,024</span></div>
-                            <div class="meta-kv"><span class="meta-kv-key">Build time</span><span class="meta-kv-value">4h 23m</span></div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Model registry</div>
-                            <div class="meta-kv"><span class="meta-kv-key">Framework</span><span class="meta-kv-value">PyTorch 2.3</span></div>
-                            <div class="meta-kv"><span class="meta-kv-key">Device</span><span class="meta-kv-value">CUDA (A100)</span></div>
-                            <div class="meta-kv"><span class="meta-kv-key">Batch size</span><span class="meta-kv-value">64</span></div>
-                            <div class="meta-kv"><span class="meta-kv-key">Similarity</span><span class="meta-kv-value">Cosine</span></div>
-                        </div>
+                            <!-- Query log (static) -->
+                <div class="log-card">
+                    <div class="log-header"><i class="ti ti-player-play" aria-hidden="true"></i> Recent query log</div>
+                    <div class="log-grid">
+                        <div class="log-head">Time</div>
+                        <div class="log-head">Query</div>
+                        <div class="log-head">Results</div>
+                        <div class="log-head">Time</div>
+                        <div id="log-rows"></div>
+                        <div id="log-queries"></div>
+                        <div id="log-results"></div>
+                        <div id="log-times"></div>
                     </div>
                 </div>
 
-            </main>
-        </div>
+                <div class="bottom-stats">
+                    <div class="stat-card">
+                        <div class="stat-label">Index details</div>
+                        <div class="meta-kv"><span class="meta-kv-key">Type</span><span class="meta-kv-value">FAISS IVF-PQ</span></div>
+                        <div class="meta-kv"><span class="meta-kv-key">Vector dim</span><span class="meta-kv-value" id="dashDim">—</span></div>
+                        <div class="meta-kv"><span class="meta-kv-key">Num cells</span><span class="meta-kv-value">1,024</span></div>
+                        <div class="meta-kv"><span class="meta-kv-key">Build time</span><span class="meta-kv-value">4h 23m</span></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Model registry</div>
+                        <div class="meta-kv"><span class="meta-kv-key">Framework</span><span class="meta-kv-value" id="dashFramework">—</span></div>
+                        <div class="meta-kv"><span class="meta-kv-key">Device</span><span class="meta-kv-value" id="dashDevice">—</span></div>
+                        <div class="meta-kv"><span class="meta-kv-key">Batch size</span><span class="meta-kv-value" id="dashBatch">—</span></div>
+                        <div class="meta-kv"><span class="meta-kv-key">Similarity</span><span class="meta-kv-value">Cosine</span></div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
     </div>
+</div>
 
-    <!-- ===== JAVASCRIPT ===== -->
-    <script>
-        // ============================================================
-        // DATA
-        // ============================================================
-        const IMGS = [
-            { id: 1, title: "Flooded agricultural area", sensor: "Sentinel-1 SAR", date: "2024-05-15", coords: "28.4°N, 77.1°E", score: 94, cloud: 0, tags: ["SAR", "Flood"], res: "10m", bg: "var(--color-background-info)" },
-            { id: 2, title: "Urban heat island", sensor: "Landsat-8 OLI", date: "2024-04-22", coords: "19.0°N, 72.8°E", score: 87, cloud: 5, tags: ["Optical", "Thermal"], res: "30m", bg: "var(--color-background-warning)" },
-            { id: 3, title: "Coastal erosion zone", sensor: "Sentinel-2 MSI", date: "2024-06-01", coords: "15.5°N, 73.8°E", score: 82, cloud: 12, tags: ["Optical", "Coastal"], res: "10m", bg: "var(--color-background-info)" },
-            { id: 4, title: "Deforestation front", sensor: "MODIS Terra", date: "2024-03-18", coords: "23.5°N, 87.5°E", score: 76, cloud: 8, tags: ["Optical", "Vegetation"], res: "250m", bg: "var(--color-background-success)" },
-            { id: 5, title: "Mountain snow cover", sensor: "NOAA-20 VIIRS", date: "2024-01-10", coords: "34.0°N, 77.5°E", score: 71, cloud: 20, tags: ["Optical", "Snow"], res: "375m", bg: "var(--color-background-secondary)" },
-            { id: 6, title: "Drought stress pattern", sensor: "Sentinel-2 MSI", date: "2024-05-28", coords: "17.3°N, 78.4°E", score: 68, cloud: 3, tags: ["Optical", "Drought"], res: "10m", bg: "var(--color-background-warning)" }
-        ];
-
-        const LOGS = [
-            { t: "14:32:01", q: "flooded agricultural area", r: 6, ms: 241 },
-            { t: "14:28:47", q: "urban heat island dense city", r: 12, ms: 198 },
-            { t: "14:15:33", q: "coastal erosion mangrove loss", r: 9, ms: 312 },
-            { t: "13:58:12", q: "[Image query · upload]", r: 7, ms: 267 },
-            { t: "13:44:05", q: "deforestation north amazon", r: 15, ms: 188 },
-            { t: "13:30:29", q: "glacier retreat himalaya 2024", r: 4, ms: 354 }
-        ];
-
-        // ============================================================
-        // HELPERS
-        // ============================================================
-        function scoreColor(s) {
-            return s >= 85 ? 'var(--color-text-success)' :
-                s >= 70 ? 'var(--color-text-warning)' :
-                'var(--color-text-danger)';
-        }
-
-        function navigateTo(pageId) {
-            // Update nav buttons
-            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-            document.querySelector(`.nav-btn[data-page="${pageId}"]`).classList.add('active');
-
-            // Update pages
-            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-            document.getElementById('page-' + pageId).classList.add('active');
-
-            // Trigger animation for results page
-            if (pageId === 'results') {
-                setTimeout(animateScores, 100);
-            }
-        }
-
-        // ============================================================
-        // SEARCH
-        // ============================================================
-        function doSearch() {
-            const status = document.getElementById('search-status');
-            const q = document.getElementById('q-text').value;
-            status.style.display = 'block';
-
-            const steps = ['s1', 's2', 's3'];
-            steps.forEach((id, i) => {
-                setTimeout(() => {
-                    document.getElementById(id).style.color = 'var(--color-text-secondary)';
-                }, 400 * (i + 1));
-            });
-
-            setTimeout(() => {
-                status.style.display = 'none';
-                navigateTo('results');
-            }, 1700);
-        }
-
-        // ============================================================
-        // VIEWER
-        // ============================================================
-        function viewImage(id) {
-            const img = IMGS.find(i => i.id === id);
-            if (!img) return;
-
-            document.getElementById('vw-thumb').style.background = img.bg;
-            document.getElementById('vw-sensor-badge').textContent = img.sensor.split(' ')[0];
-            document.getElementById('vw-date-badge').textContent = img.date;
-            document.getElementById('vw-title').textContent = img.title;
-
-            const sc = scoreColor(img.score);
-            document.getElementById('vw-score-bar').style.width = img.score + '%';
-            document.getElementById('vw-score-bar').style.background = sc;
-            document.getElementById('vw-score-val').style.color = sc;
-            document.getElementById('vw-score-val').textContent = img.score + '%';
-
-            document.getElementById('md-sensor').textContent = img.sensor;
-            document.getElementById('md-date').textContent = img.date;
-            document.getElementById('md-coords').textContent = img.coords;
-            document.getElementById('md-cloud').textContent = img.cloud + '%';
-            document.getElementById('md-res').textContent = img.res;
-
-            navigateTo('viewer');
-        }
-
-        // ============================================================
-        // RESULTS CARDS
-        // ============================================================
-        function animateScores() {
-            document.querySelectorAll('.score-bar').forEach(b => {
-                setTimeout(() => {
-                    b.style.width = b.dataset.score + '%';
-                }, 50);
-            });
-        }
-
-        function renderCards() {
-            const grid = document.getElementById('card-grid');
-            grid.innerHTML = IMGS.map(img => `
-                    <div class="result-card" onclick="viewImage(${img.id})">
-                        <div class="result-thumb" style="background:${img.bg};">
-                            <span class="result-badge sensor">${img.sensor.split(' ')[0]}</span>
-                            <span class="result-badge cloud">☁ ${img.cloud}%</span>
-                            <i class="ti ti-crosshair result-icon" aria-hidden="true"></i>
-                        </div>
-                        <div class="result-body">
-                            <div class="result-title">${img.title}</div>
-                            <div class="result-date">${img.date}</div>
-                            <div class="result-tags">
-                                ${img.tags.map(t => `<span class="tag">${t}</span>`).join('')}
-                                <span class="tag res">${img.res}</span>
-                            </div>
-                            <div class="result-score-row">
-                                <span class="result-score-label">Match</span>
-                                <span class="result-score-value" style="color:${scoreColor(img.score)}">${img.score}%</span>
-                            </div>
-                            <div class="result-score-bar">
-                                <div class="score-bar" data-score="${img.score}" style="width:0%;background:${scoreColor(img.score)};transition:width 0.5s ease ${img.id * 60}ms;"></div>
-                            </div>
-                        </div>
-                    </div>
-                `).join('');
-        }
-
-        // ============================================================
-        // QUERY LOG
-        // ============================================================
-        function renderLog() {
-            const rows = document.getElementById('log-rows');
-            const queries = document.getElementById('log-queries');
-            const results = document.getElementById('log-results');
-            const times = document.getElementById('log-times');
-
-            rows.innerHTML = LOGS.map((l, i) =>
-                `<div class="log-cell">${l.t}${i === 0 ? ' <span class="live-dot"></span>' : ''}</div>`
-            ).join('');
-
-            queries.innerHTML = LOGS.map(l =>
-                `<div class="log-cell query-text">${l.q}</div>`
-            ).join('');
-
-            results.innerHTML = LOGS.map(l =>
-                `<div class="log-cell result-count">${l.r}</div>`
-            ).join('');
-
-            times.innerHTML = LOGS.map(l =>
-                `<div class="log-cell" style="color:${l.ms > 300 ? 'var(--color-text-warning)' : 'var(--color-text-tertiary)'}">${l.ms}ms</div>`
-            ).join('');
-        }
-
-        // ============================================================
-        // TAB SWITCHING (Search page)
-        // ============================================================
-        document.querySelectorAll('.query-tab').forEach(tab => {
-            tab.addEventListener('click', function() {
-                document.querySelectorAll('.query-tab').forEach(t => t.classList.remove('active'));
-                this.classList.add('active');
-            });
-        });
-
-        // ============================================================
-        // NAVIGATION (Sidebar)
-        // ============================================================
-        document.querySelectorAll('.nav-btn').forEach(btn => {
-            btn.addEventListener('click', function() {
-                const page = this.dataset.page;
-                navigateTo(page);
-            });
-        });
-
-        // ============================================================
-        // CLEAR FILTERS (optional extra)
-        // ============================================================
-        document.querySelector('.btn-clear-filters')?.addEventListener('click', function() {
-            document.querySelectorAll('.filters-panel input[type="checkbox"]').forEach(cb => cb.checked = false);
-            document.querySelector('.filters-panel input[type="range"]').value = 30;
-            document.getElementById('cc-val').textContent = '30%';
-            document.querySelectorAll('.filters-panel input[type="date"]').forEach(d => d.value = '');
-        });
-
-        // ============================================================
-        // INIT
-        // ============================================================
-        renderCards();
-        renderLog();
-
-        // Auto-activate first nav
-        document.querySelector('.nav-btn.active')?.classList.remove('active');
-        document.querySelector('.nav-btn[data-page="search"]')?.classList.add('active');
-    </script>
-
+                <!-- ===== javascript ===== -->
+        <script src="script.js"></script>
+    
 </body>
 </html>
