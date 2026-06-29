@@ -36,6 +36,7 @@ GeoSat trains two ResNet18-based encoder networks — one for SAR imagery and on
 ├── test_retrieval.py                 # CLI retrieval evaluation script
 ├── flask_backend.py                  # REST API server
 ├── index.html                        # Web frontend
+├── script.js                         # Frontend Javascript
 ├── styles.css                        # Frontend styles
 └── rquirements.txt                   # Dependency list
 ```
