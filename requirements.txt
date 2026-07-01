@@ -1,0 +1,7 @@
+gunicorn
+flask
+torch
+torchvision
+pillow
+tqdm
+matplotlib
