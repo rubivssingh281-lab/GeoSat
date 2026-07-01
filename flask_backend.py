@@ -6,7 +6,6 @@ from flask import Flask, jsonify, request, send_file
 from PIL import Image
 from torchvision import transforms
 
-from train import Encoder
 
 
 app = Flask(__name__)
