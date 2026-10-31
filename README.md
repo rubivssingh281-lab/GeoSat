@@ -38,7 +38,7 @@ GeoSat trains two ResNet18-based encoder networks — one for SAR imagery and on
 ├── index.html                        # Web frontend
 ├── script.js                         # Frontend Javascript
 ├── styles.css                        # Frontend styles
-└── rquirements.txt                   # Dependency list
+└── requirements.txt                  # Dependency list
 ```
 
 ---
@@ -47,10 +47,11 @@ GeoSat trains two ResNet18-based encoder networks — one for SAR imagery and on
 
 **Python 3.10 or newer** is recommended.
 
-Install dependencies:
+Install dependencies in a virtual environment:
 
 ```bash
-pip install torch torchvision pillow tqdm matplotlib flask
+python -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 > **GPU:** CUDA is used automatically when available. CPU execution is supported but significantly slower.
@@ -193,20 +194,34 @@ k=6
       "image_url": "/api/image/optical/ROIs1868_summer_s2_59_p10.png"
     }
   ],
-  "database_connected": false
+  "database_connected": true,
+  "latency_ms": 184.52
 }
 ```
+
+The backend resolves data and model paths relative to `flask_backend.py`, so it
+can be started from any working directory. Invalid `k`, `limit`, missing query
+files, and unsafe image paths return an appropriate `4xx` response.
 
 ---
 
 ## Web Frontend
 
-Open `index.html` in a browser (with the Flask API running) to use the GeoSat interface, which provides:
+Start the API, then serve the frontend over HTTP (opening the file directly can
+block browser requests):
+
+```bash
+.venv/bin/python flask_backend.py
+# In a second terminal:
+python -m http.server 8080
+```
+
+Open `http://127.0.0.1:8080` to use the GeoSat interface, which provides:
 
 - **Search** — text query, image upload, and map-region query tabs with sensor type, date range, and cloud cover filters
 - **Results** — image grid with cosine similarity scores and metadata tags
 - **Image Viewer** — full-resolution view with sensor, date, coordinate, and resolution metadata
-- **Dashboard** — query log with latency tracking
+- **Dashboard** — live backend/device/cache status and query log with latency tracking
 
 ---
 
@@ -240,8 +255,7 @@ Both encoders share the same architecture: a ResNet18 backbone with the classifi
 ## Known Limitations
 
 - No formal evaluation metrics script (Recall@K, mAP) is included.
-- The web frontend currently uses mock data for the dashboard; live API wiring is partial.
-- `rquirements.txt` is provided but currently empty; install dependencies manually as described above.
+- Text and map-region search tabs are UI placeholders; image upload is the supported query mode.
 - The Flask server is intended for development use; deploy behind a production WSGI server (e.g. Gunicorn) for production workloads.
 
 ---
