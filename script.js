@@ -7,6 +7,7 @@
     let currentResults = [];           // array of result objects from API
     let selectedResult = null;         // for viewer
     let selectedFile = null;           // File object for upload
+    let queryLog = [];
 
     // ============================================================
                           // DOM refs
@@ -160,6 +161,14 @@
             const data = await response.json();
             // data = { query, count, results: [ { rank, filename, score, match_percent, image_url }, ... ] }
             currentResults = data.results || [];
+            queryLog.unshift({
+                t: new Date().toLocaleTimeString(),
+                q: data.query || '[Image query]',
+                r: data.count || 0,
+                ms: data.latency_ms || 0
+            });
+            queryLog = queryLog.slice(0, 6);
+            renderLog();
 
             // Update status with success
             document.getElementById('s1').textContent = '✓ Query encoded';
@@ -199,7 +208,7 @@
         resultsTitle.textContent = `${count} result${count !== 1 ? 's' : ''} found`;
 
         // generate a fake time (or use actual response time if available)
-        const timeStr = '0.24 s'; // could be improved
+        const timeStr = data.latency_ms ? `${(data.latency_ms / 1000).toFixed(2)} s` : '—';
         resultsMeta.textContent = `Retrieved in ${timeStr} · sorted by similarity`;
 
         if (count === 0) {
@@ -212,9 +221,7 @@
             const score = res.match_percent || 0;
             const filename = res.filename || 'unknown';
             const imageUrl = res.image_url ? `${API_BASE}${res.image_url}` : '#';
-            // We don't have sensor/date/coords from the backend, so use placeholders.
-            // Could parse filename or add more fields; for now we generate dummy info.
-            const sensor = 'Sentinel-1 SAR'; // or derive from filename?
+            const sensor = 'Optical';
             const date = filename.match(/\d{4}-\d{2}-\d{2}/) ? filename.match(/\d{4}-\d{2}-\d{2}/)[0] : '2024-01-01';
             const coords = '—';
             const cloud = '—';
@@ -298,7 +305,7 @@
         }
 
         // Set metadata (extract from filename or use defaults)
-        const sensor = 'Sentinel-1 SAR';
+        const sensor = 'Optical';
         const date = filename.match(/\d{4}-\d{2}-\d{2}/) ? filename.match(/\d{4}-\d{2}-\d{2}/)[0] : '—';
         const coords = '—';
         const cloud = '—';
@@ -339,11 +346,13 @@
             dashIndexStatus.textContent = data.embedding_cache_found ? 'Loaded ✓' : 'Not cached';
             dashIndexStatus.style.color = data.embedding_cache_found ? 'var(--color-text-success)' : 'var(--color-text-warning)';
             dashEncoder.textContent = 'ResNet18';
-            dashQueryTime.textContent = '0.24s'; // not provided
-            dashDim.textContent = '256'; // fixed
-            dashFramework.textContent = 'PyTorch';
+            dashQueryTime.textContent = '—';
+            dashDim.textContent = data.embedding_dimension || '—';
+            dashFramework.textContent = data.framework || '—';
             dashDevice.textContent = data.device || '—';
-            dashBatch.textContent = '64';
+            dashBatch.textContent = data.batch_size || '—';
+            document.querySelector('.status-text').textContent =
+                data.dataset_found ? `Index online · ${data.optical_images}` : 'Dataset unavailable';
         } catch (err) {
             console.error('Dashboard fetch error:', err);
             dashIndexed.textContent = '⚠️';
@@ -354,27 +363,18 @@
     // ============================================================
                       // Query Log (static mock)
 
-    const LOGS = [
-        { t: "14:32:01", q: "flooded agricultural area", r: 6, ms: 241 },
-        { t: "14:28:47", q: "urban heat island dense city", r: 12, ms: 198 },
-        { t: "14:15:33", q: "coastal erosion mangrove loss", r: 9, ms: 312 },
-        { t: "13:58:12", q: "[Image query · upload]", r: 7, ms: 267 },
-        { t: "13:44:05", q: "deforestation north amazon", r: 15, ms: 188 },
-        { t: "13:30:29", q: "glacier retreat himalaya 2024", r: 4, ms: 354 }
-    ];
-
     function renderLog() {
         const rows = document.getElementById('log-rows');
         const queries = document.getElementById('log-queries');
         const results = document.getElementById('log-results');
         const times = document.getElementById('log-times');
 
-        rows.innerHTML = LOGS.map((l, i) =>
+        rows.innerHTML = queryLog.map((l, i) =>
             `<div class="log-cell">${l.t}${i === 0 ? ' <span class="live-dot"></span>' : ''}</div>`
         ).join('');
-        queries.innerHTML = LOGS.map(l => `<div class="log-cell query-text">${l.q}</div>`).join('');
-        results.innerHTML = LOGS.map(l => `<div class="log-cell result-count">${l.r}</div>`).join('');
-        times.innerHTML = LOGS.map(l =>
+        queries.innerHTML = queryLog.map(l => `<div class="log-cell query-text">${l.q}</div>`).join('');
+        results.innerHTML = queryLog.map(l => `<div class="log-cell result-count">${l.r}</div>`).join('');
+        times.innerHTML = queryLog.map(l =>
             `<div class="log-cell" style="color:${l.ms > 300 ? 'var(--color-text-warning)' : 'var(--color-text-tertiary)'}">${l.ms}ms</div>`
         ).join('');
     }
@@ -415,5 +415,4 @@
     // Ensure correct active page: search is active.
     document.querySelector('.nav-btn.active')?.classList.remove('active');
     document.querySelector('.nav-btn[data-page="search"]')?.classList.add('active');
-
 

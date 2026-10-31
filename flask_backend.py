@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import torch
@@ -11,12 +12,13 @@ from train import Encoder
 
 app = Flask(__name__)
 
-BASE_DIR = Path("data")
+PROJECT_DIR = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_DIR / "data"
 SAR_DIR = BASE_DIR / "SAR"
 OPTICAL_DIR = BASE_DIR / "Optical"
 PAIRED_DIR = BASE_DIR / "Paired_SAR_Optical_images"
 
-SAVE_DIR = Path("saved_model")
+SAVE_DIR = PROJECT_DIR / "saved_model"
 SAR_MODEL = SAVE_DIR / "sar_encoder.pth"
 OPTICAL_MODEL = SAVE_DIR / "optical_encoder.pth"
 EMBEDDING_CACHE_PATH = SAVE_DIR / "optical_embeddings.pt"
@@ -158,9 +160,9 @@ def encode_query_image(sar_encoder, sar_dir, query_file=None, uploaded_file=None
         if not query_file:
             raise ValueError("Provide query_file or upload an image file.")
 
-        image_path = sar_dir / query_file
+        image_path = (sar_dir / query_file).resolve()
 
-        if not image_path.is_file():
+        if sar_dir not in image_path.parents or not image_path.is_file():
             raise FileNotFoundError(f"Query image not found: {query_file}")
 
         img = Image.open(image_path).convert("L")
@@ -175,6 +177,11 @@ def encode_query_image(sar_encoder, sar_dir, query_file=None, uploaded_file=None
 
 
 def retrieve_matches(query_file=None, uploaded_file=None, k=6, limit=2000, refresh_cache=False):
+    if k < 1:
+        raise ValueError("k must be at least 1.")
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be at least 1.")
+
     sar_dir, optical_dir = get_data_dirs()
 
     if sar_dir is None or optical_dir is None:
@@ -250,7 +257,10 @@ def status():
         "sar_model_found": SAR_MODEL.exists(),
         "optical_model_found": OPTICAL_MODEL.exists(),
         "embedding_cache_found": EMBEDDING_CACHE_PATH.exists(),
-        "database_connected": False,
+        "database_connected": bool(optical_files and EMBEDDING_CACHE_PATH.exists()),
+        "embedding_dimension": 256,
+        "batch_size": BATCH_SIZE,
+        "framework": "PyTorch",
     })
 
 
@@ -278,10 +288,15 @@ def image(kind, filename):
     else:
         return jsonify({"error": "kind must be 'sar' or 'optical'"}), 400
 
-    if filename not in list_images(directory):
+    image_path = (directory / filename).resolve() if directory else None
+    if (
+        directory is None
+        or directory not in image_path.parents
+        or filename not in list_images(directory)
+    ):
         return jsonify({"error": "image not found"}), 404
 
-    return send_file(directory / filename)
+    return send_file(image_path)
 
 
 @app.route("/api/retrieve", methods=["POST", "OPTIONS"])
@@ -299,9 +314,11 @@ def retrieve():
 
         query_file = payload.get("query_file")
         k = int(payload.get("k", 6))
-        limit = int(payload.get("limit", 2000))
+        limit_value = payload.get("limit", 2000)
+        limit = None if str(limit_value).lower() in {"none", "all"} else int(limit_value)
         refresh_cache = str(payload.get("refresh_cache", "false")).lower() == "true"
 
+        started_at = time.perf_counter()
         query_name, results = retrieve_matches(
             query_file=query_file,
             uploaded_file=uploaded_file,
@@ -314,10 +331,16 @@ def retrieve():
             "query": query_name,
             "count": len(results),
             "results": results,
-            "database_connected": False,
+            "database_connected": True,
+            "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
         })
 
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
     except Exception as exc:
+        app.logger.exception("Retrieval failed")
         return jsonify({"error": str(exc)}), 500
 
 
