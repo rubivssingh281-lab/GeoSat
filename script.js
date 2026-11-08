@@ -3,7 +3,8 @@
 
 // GLOBALS
 
-    const API_BASE = 'http://127.0.0.1:5000';
+    const API_BASE = window.GEOSAT_API_BASE || 'http://127.0.0.1:5000';
+    const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
     let currentResults = [];           // array of result objects from API
     let selectedResult = null;         // for viewer
     let selectedFile = null;           // File object for upload
@@ -98,14 +99,42 @@
     fileInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (file) {
-            selectedFile = file;
-            fileName.textContent = file.name;
-            fileInfo.style.display = 'block';
-            // also show a preview? not needed.
+            selectFile(file);
         } else {
             clearFileSelection();
         }
     });
+
+    uploadArea.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        uploadArea.classList.add('is-dragging');
+    });
+
+    uploadArea.addEventListener('dragleave', () => {
+        uploadArea.classList.remove('is-dragging');
+    });
+
+    uploadArea.addEventListener('drop', (event) => {
+        event.preventDefault();
+        uploadArea.classList.remove('is-dragging');
+        selectFile(event.dataTransfer.files[0]);
+    });
+
+    function selectFile(file) {
+        if (!file) return;
+        if (!file.type.startsWith('image/')) {
+            showSearchError('Please choose an image file.');
+            return;
+        }
+        if (file.size > MAX_UPLOAD_BYTES) {
+            showSearchError('Please choose an image smaller than 25 MB.');
+            return;
+        }
+        selectedFile = file;
+        fileName.textContent = file.name;
+        fileInfo.style.display = 'block';
+        searchStatus.style.display = 'none';
+    }
 
     clearFileBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -117,6 +146,23 @@
         fileInput.value = '';
         fileInfo.style.display = 'none';
         fileName.textContent = '';
+    }
+
+    function escapeHtml(value) {
+        return String(value)
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+    }
+
+    function showSearchError(message) {
+        searchStatus.style.display = 'block';
+        searchStatus.classList.add('error');
+        statusLines.s1.textContent = `❌ ${message}`;
+        statusLines.s2.textContent = '';
+        statusLines.s3.textContent = '';
     }
 
     // ============================================================
@@ -148,10 +194,14 @@
             formData.append('limit', '2000');
             formData.append('refresh_cache', 'false');
 
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 120000);
             const response = await fetch(`${API_BASE}/api/retrieve`, {
                 method: 'POST',
-                body: formData
+                body: formData,
+                signal: controller.signal
             });
+            clearTimeout(timeout);
 
             if (!response.ok) {
                 const errData = await response.json();
@@ -202,7 +252,7 @@
                           // Render Results
  
     function renderResults(data) {
-        const query = data.query || 'uploaded image';
+        const query = escapeHtml(data.query || 'uploaded image');
         const count = data.count || 0;
         resultsQueryLabel.textContent = `Query · "${query}"`;
         resultsTitle.textContent = `${count} result${count !== 1 ? 's' : ''} found`;
@@ -219,8 +269,8 @@
         let html = '';
         currentResults.forEach((res, index) => {
             const score = res.match_percent || 0;
-            const filename = res.filename || 'unknown';
-            const imageUrl = res.image_url ? `${API_BASE}${res.image_url}` : '#';
+            const filename = escapeHtml(res.filename || 'unknown');
+            const imageUrl = res.image_url ? `${API_BASE}${encodeURI(res.image_url)}` : '#';
             const sensor = 'Optical';
             const date = filename.match(/\d{4}-\d{2}-\d{2}/) ? filename.match(/\d{4}-\d{2}-\d{2}/)[0] : '2024-01-01';
             const coords = '—';
@@ -291,9 +341,9 @@
         selectedResult = res;
 
         // Populate viewer
-        const filename = res.filename || 'unknown';
+        const filename = escapeHtml(res.filename || 'unknown');
         const score = res.match_percent || 0;
-        const imageUrl = res.image_url ? `${API_BASE}${res.image_url}` : '';
+        const imageUrl = res.image_url ? `${API_BASE}${encodeURI(res.image_url)}` : '';
 
         // Show image
         if (imageUrl) {
@@ -342,15 +392,19 @@
             if (!resp.ok) throw new Error('Status API error');
             const data = await resp.json();
 
-            dashIndexed.textContent = data.optical_images || '—';
+            dashIndexed.textContent = data.optical_images ?? '—';
             dashIndexStatus.textContent = data.embedding_cache_found ? 'Loaded ✓' : 'Not cached';
             dashIndexStatus.style.color = data.embedding_cache_found ? 'var(--color-text-success)' : 'var(--color-text-warning)';
             dashEncoder.textContent = 'ResNet18';
             dashQueryTime.textContent = '—';
-            dashDim.textContent = data.embedding_dimension || '—';
-            dashFramework.textContent = data.framework || '—';
-            dashDevice.textContent = data.device || '—';
-            dashBatch.textContent = data.batch_size || '—';
+            dashDim.textContent = data.embedding_dimension ?? '—';
+            dashFramework.textContent = data.framework ?? '—';
+            dashDevice.textContent = data.device ?? '—';
+            dashBatch.textContent = data.batch_size ?? '—';
+            if (queryLog.length) {
+                const average = queryLog.reduce((sum, item) => sum + item.ms, 0) / queryLog.length;
+                dashQueryTime.textContent = `${(average / 1000).toFixed(2)}s`;
+            }
             document.querySelector('.status-text').textContent =
                 data.dataset_found ? `Index online · ${data.optical_images}` : 'Dataset unavailable';
         } catch (err) {
@@ -372,7 +426,7 @@
         rows.innerHTML = queryLog.map((l, i) =>
             `<div class="log-cell">${l.t}${i === 0 ? ' <span class="live-dot"></span>' : ''}</div>`
         ).join('');
-        queries.innerHTML = queryLog.map(l => `<div class="log-cell query-text">${l.q}</div>`).join('');
+        queries.innerHTML = queryLog.map(l => `<div class="log-cell query-text">${escapeHtml(l.q)}</div>`).join('');
         results.innerHTML = queryLog.map(l => `<div class="log-cell result-count">${l.r}</div>`).join('');
         times.innerHTML = queryLog.map(l =>
             `<div class="log-cell" style="color:${l.ms > 300 ? 'var(--color-text-warning)' : 'var(--color-text-tertiary)'}">${l.ms}ms</div>`
@@ -415,4 +469,3 @@
     // Ensure correct active page: search is active.
     document.querySelector('.nav-btn.active')?.classList.remove('active');
     document.querySelector('.nav-btn[data-page="search"]')?.classList.add('active');
-
