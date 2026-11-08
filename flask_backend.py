@@ -1,4 +1,5 @@
 import os
+import json
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ SAR_MODEL = SAVE_DIR / "sar_encoder.pth"
 OPTICAL_MODEL = SAVE_DIR / "optical_encoder.pth"
 EMBEDDING_CACHE_PATH = SAVE_DIR / "optical_embeddings.pt"
 EMBEDDING_FILES_LIST = SAVE_DIR / "optical_files.txt"
+CACHE_METADATA_PATH = SAVE_DIR / "optical_cache.json"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BATCH_SIZE = 64 if DEVICE.type == "cuda" else 32
@@ -111,18 +113,31 @@ def load_models():
     return SAR_ENCODER, OPTICAL_ENCODER
 
 
-def cache_is_valid(files):
-    if not EMBEDDING_CACHE_PATH.exists() or not EMBEDDING_FILES_LIST.exists():
+def cache_is_valid(files, optical_dir):
+    if (
+        not EMBEDDING_CACHE_PATH.exists()
+        or not EMBEDDING_FILES_LIST.exists()
+        or not CACHE_METADATA_PATH.exists()
+    ):
         return False
 
     cached_files = EMBEDDING_FILES_LIST.read_text(encoding="utf-8").splitlines()
-    return cached_files == files
+    try:
+        metadata = json.loads(CACHE_METADATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    return (
+        cached_files == files
+        and metadata.get("optical_dir") == str(optical_dir.resolve())
+        and metadata.get("embedding_dimension") == 256
+    )
 
 
 def build_optical_database(optical_encoder, optical_dir, files, limit=None, refresh_cache=False):
     selected_files = files[:limit] if limit else files
 
-    if not refresh_cache and cache_is_valid(selected_files):
+    if not refresh_cache and cache_is_valid(selected_files, optical_dir):
         return selected_files, torch.load(EMBEDDING_CACHE_PATH, map_location="cpu")
 
     embeddings = []
@@ -144,6 +159,14 @@ def build_optical_database(optical_encoder, optical_dir, files, limit=None, refr
     SAVE_DIR.mkdir(exist_ok=True)
     torch.save(embeddings, EMBEDDING_CACHE_PATH)
     EMBEDDING_FILES_LIST.write_text("\n".join(selected_files) + "\n", encoding="utf-8")
+    CACHE_METADATA_PATH.write_text(
+        json.dumps({
+            "optical_dir": str(optical_dir.resolve()),
+            "embedding_dimension": int(embeddings.shape[1]),
+            "count": len(selected_files),
+        }, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     return selected_files, embeddings
 
@@ -177,8 +200,8 @@ def encode_query_image(sar_encoder, sar_dir, query_file=None, uploaded_file=None
 
 
 def retrieve_matches(query_file=None, uploaded_file=None, k=6, limit=2000, refresh_cache=False):
-    if k < 1:
-        raise ValueError("k must be at least 1.")
+    if k < 1 or k > 100:
+        raise ValueError("k must be between 1 and 100.")
     if limit is not None and limit < 1:
         raise ValueError("limit must be at least 1.")
 
@@ -240,6 +263,7 @@ def health():
     return jsonify({
         "status": "ok",
         "device": DEVICE.type,
+        "models_loaded": SAR_ENCODER is not None and OPTICAL_ENCODER is not None,
     })
 
 
@@ -257,6 +281,7 @@ def status():
         "sar_model_found": SAR_MODEL.exists(),
         "optical_model_found": OPTICAL_MODEL.exists(),
         "embedding_cache_found": EMBEDDING_CACHE_PATH.exists(),
+        "embedding_cache_metadata_found": CACHE_METADATA_PATH.exists(),
         "database_connected": bool(optical_files and EMBEDDING_CACHE_PATH.exists()),
         "embedding_dimension": 256,
         "batch_size": BATCH_SIZE,
@@ -313,6 +338,10 @@ def retrieve():
             payload = request.get_json(silent=True) or {}
 
         query_file = payload.get("query_file")
+        if uploaded_file and not uploaded_file.filename:
+            raise ValueError("Uploaded file must have a filename.")
+        if not uploaded_file and not query_file:
+            raise ValueError("Provide query_file or upload an image file.")
         k = int(payload.get("k", 6))
         limit_value = payload.get("limit", 2000)
         limit = None if str(limit_value).lower() in {"none", "all"} else int(limit_value)
