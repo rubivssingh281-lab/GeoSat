@@ -1,4 +1,7 @@
+import argparse
 import os
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,25 +10,10 @@ from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_DIR / 'data'
+SAVE_DIR = PROJECT_DIR / 'saved_model'
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-BASE_DIR = 'data'
-SAR_DIR = os.path.join(BASE_DIR, 'SAR')
-OPTICAL_DIR = os.path.join(BASE_DIR, 'Optical')
-PAIRED_DIR = os.path.join(BASE_DIR, 'Paired_SAR_Optical_images')
-
-if os.path.isdir(SAR_DIR) and os.path.isdir(OPTICAL_DIR):
-    pass
-elif os.path.isdir(PAIRED_DIR):
-    SAR_DIR = PAIRED_DIR
-    OPTICAL_DIR = PAIRED_DIR
-else:
-    raise FileNotFoundError(
-        'Dataset not found. Create data/SAR and data/Optical directories, or use data/Paired_SAR_Optical_images.'
-    )
-
-SAVE_DIR = 'saved_model'
-os.makedirs(SAVE_DIR, exist_ok=True)
 
 USE_CPU_FALLBACK = DEVICE.type == 'cpu'
 DEFAULT_EPOCHS = 10 if not USE_CPU_FALLBACK else 3
@@ -35,16 +23,34 @@ NUM_WORKERS = 4 if not USE_CPU_FALLBACK else 0
 PIN_MEMORY = not USE_CPU_FALLBACK
 
 
+def get_data_dirs():
+    sar_dir = DATA_DIR / 'SAR'
+    optical_dir = DATA_DIR / 'Optical'
+    paired_dir = DATA_DIR / 'Paired_SAR_Optical_images'
+
+    if sar_dir.is_dir() and optical_dir.is_dir():
+        return sar_dir, optical_dir
+    if paired_dir.is_dir():
+        return paired_dir, paired_dir
+    raise FileNotFoundError(
+        'Dataset not found. Create data/SAR and data/Optical directories, '
+        'or use data/Paired_SAR_Optical_images.'
+    )
+
+
 class SAROpticalDataset(Dataset):
     def __init__(self, sar_dir, optical_dir):
         self.sar_dir = sar_dir
         self.optical_dir = optical_dir
 
+        valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}
         sar_files = sorted(
-            [f for f in os.listdir(sar_dir) if os.path.isfile(os.path.join(sar_dir, f))]
+            p.name for p in Path(sar_dir).iterdir()
+            if p.is_file() and p.suffix.lower() in valid_extensions
         )
         optical_files = sorted(
-            [f for f in os.listdir(optical_dir) if os.path.isfile(os.path.join(optical_dir, f))]
+            p.name for p in Path(optical_dir).iterdir()
+            if p.is_file() and p.suffix.lower() in valid_extensions
         )
 
         self.files = sorted(list(set(sar_files).intersection(optical_files)))
@@ -116,16 +122,18 @@ def contrastive_loss(sar_embed, optical_embed, temperature=0.07):
     return (loss_sar_to_optical + loss_optical_to_sar) / 2
 
 
-def train():
-    dataset = SAROpticalDataset(SAR_DIR, OPTICAL_DIR)
+def train(epochs=DEFAULT_EPOCHS, max_samples=MAX_TRAIN_SAMPLES):
+    sar_dir, optical_dir = get_data_dirs()
+    SAVE_DIR.mkdir(exist_ok=True)
+    dataset = SAROpticalDataset(sar_dir, optical_dir)
 
-    if MAX_TRAIN_SAMPLES is not None and len(dataset) > MAX_TRAIN_SAMPLES:
-        dataset.files = dataset.files[:MAX_TRAIN_SAMPLES]
-        print(f'CPU fallback enabled: using first {MAX_TRAIN_SAMPLES} paired images')
+    if max_samples is not None and len(dataset) > max_samples:
+        dataset.files = dataset.files[:max_samples]
+        print(f'Using first {max_samples} paired images')
 
     print(f'Using device: {DEVICE}')
     print(f'Dataset size: {len(dataset)} paired images')
-    print(f'Epochs: {DEFAULT_EPOCHS}, Batch size: {BATCH_SIZE}')
+    print(f'Epochs: {epochs}, Batch size: {BATCH_SIZE}')
 
     if DEVICE.type == 'cuda':
         torch.backends.cudnn.benchmark = True
@@ -146,14 +154,12 @@ def train():
         lr=1e-4
     )
 
-    EPOCHS = DEFAULT_EPOCHS
-
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         sar_encoder.train()
         optical_encoder.train()
         total_loss = 0.0
 
-        for sar_imgs, optical_imgs, _ in tqdm(dataloader, desc=f'Epoch {epoch+1}/{EPOCHS}'):
+        for sar_imgs, optical_imgs, _ in tqdm(dataloader, desc=f'Epoch {epoch+1}/{epochs}'):
             sar_imgs = sar_imgs.to(DEVICE)
             optical_imgs = optical_imgs.to(DEVICE)
 
@@ -170,11 +176,19 @@ def train():
         avg_loss = total_loss / len(dataloader)
         print(f'Epoch [{epoch+1}/{EPOCHS}] Loss: {avg_loss:.4f}')
 
-        torch.save(sar_encoder.state_dict(), os.path.join(SAVE_DIR, 'sar_encoder.pth'))
-        torch.save(optical_encoder.state_dict(), os.path.join(SAVE_DIR, 'optical_encoder.pth'))
+        torch.save(sar_encoder.state_dict(), SAVE_DIR / 'sar_encoder.pth')
+        torch.save(optical_encoder.state_dict(), SAVE_DIR / 'optical_encoder.pth')
 
     print('Training completed.')
 
 
 if __name__ == '__main__':
-    train()
+    parser = argparse.ArgumentParser(description='Train the GeoSat dual encoder.')
+    parser.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument('--max-samples', type=int, default=MAX_TRAIN_SAMPLES)
+    args = parser.parse_args()
+    if args.epochs < 1:
+        parser.error('--epochs must be at least 1')
+    if args.max_samples is not None and args.max_samples < 1:
+        parser.error('--max-samples must be at least 1')
+    train(epochs=args.epochs, max_samples=args.max_samples)
