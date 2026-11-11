@@ -388,15 +388,21 @@
 
     async function fetchDashboardStatus() {
         try {
-            const resp = await fetch(`${API_BASE}/api/status`);
-            if (!resp.ok) throw new Error('Status API error');
-            const data = await resp.json();
+            const [statusResp, metricsResp] = await Promise.all([
+                fetch(`${API_BASE}/api/status`),
+                fetch(`${API_BASE}/api/metrics`)
+            ]);
+            if (!statusResp.ok || !metricsResp.ok) throw new Error('Status API error');
+            const data = await statusResp.json();
+            const metrics = await metricsResp.json();
 
             dashIndexed.textContent = data.optical_images ?? '—';
             dashIndexStatus.textContent = data.embedding_cache_found ? 'Loaded ✓' : 'Not cached';
             dashIndexStatus.style.color = data.embedding_cache_found ? 'var(--color-text-success)' : 'var(--color-text-warning)';
             dashEncoder.textContent = 'ResNet18';
-            dashQueryTime.textContent = '—';
+            dashQueryTime.textContent = metrics.average_latency_ms == null
+                ? '—'
+                : `${(metrics.average_latency_ms / 1000).toFixed(2)}s`;
             dashDim.textContent = data.embedding_dimension ?? '—';
             dashFramework.textContent = data.framework ?? '—';
             dashDevice.textContent = data.device ?? '—';
@@ -407,6 +413,10 @@
             }
             document.querySelector('.status-text').textContent =
                 data.dataset_found ? `Index online · ${data.optical_images}` : 'Dataset unavailable';
+            if (metrics.failed_queries > 0) {
+                document.querySelector('.status-text').textContent +=
+                    ` · ${metrics.failed_queries} failed`;
+            }
         } catch (err) {
             console.error('Dashboard fetch error:', err);
             dashIndexed.textContent = '⚠️';
