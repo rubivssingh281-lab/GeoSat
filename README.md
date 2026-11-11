@@ -155,6 +155,7 @@ The API runs at `http://127.0.0.1:5000` by default.
 |---|---|---|
 | `GET` | `/api/health` | Health check and device info |
 | `GET` | `/api/status` | Dataset, model, and cache status |
+| `GET` | `/api/metrics` | In-process query counts and average latency |
 | `GET` | `/api/images/<kind>` | List images (`sar` or `optical`) |
 | `GET` | `/api/image/<kind>/<filename>` | Serve an individual image |
 | `POST` | `/api/retrieve` | Run SAR-to-optical retrieval |
@@ -202,6 +203,10 @@ k=6
 The backend resolves data and model paths relative to `flask_backend.py`, so it
 can be started from any working directory. Invalid `k`, `limit`, missing query
 files, and unsafe image paths return an appropriate `4xx` response.
+
+`/api/metrics` reports successful and failed retrieval counts plus the average
+latency for the most recent 50 successful queries. Metrics are intentionally
+in-memory and reset when the development server restarts.
 
 ---
 
@@ -256,6 +261,7 @@ Both encoders share the same architecture: a ResNet18 backbone with the classifi
 
 - No formal evaluation metrics script (Recall@K, mAP) is included.
 - Text and map-region search tabs are UI placeholders; image upload is the supported query mode.
+- Query metrics are process-local and are not intended to replace production monitoring.
 - The Flask server is intended for development use; deploy behind a production WSGI server (e.g. Gunicorn) for production workloads.
 
 ---

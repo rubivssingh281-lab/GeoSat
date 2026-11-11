@@ -1,6 +1,7 @@
 import os
 import json
 import time
+from collections import deque
 from pathlib import Path
 
 import torch
@@ -31,6 +32,12 @@ BATCH_SIZE = 64 if DEVICE.type == "cuda" else 32
 
 SAR_ENCODER = None
 OPTICAL_ENCODER = None
+QUERY_METRICS = {
+    "total_queries": 0,
+    "successful_queries": 0,
+    "failed_queries": 0,
+    "recent_latency_ms": deque(maxlen=50),
+}
 
 
 @app.route("/")
@@ -49,6 +56,16 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     return response
+
+
+def metrics_snapshot():
+    latencies = list(QUERY_METRICS["recent_latency_ms"])
+    return {
+        "total_queries": QUERY_METRICS["total_queries"],
+        "successful_queries": QUERY_METRICS["successful_queries"],
+        "failed_queries": QUERY_METRICS["failed_queries"],
+        "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else None,
+    }
 
 
 TRANSFORM_SAR = transforms.Compose([
@@ -101,8 +118,8 @@ def load_models():
     sar_encoder = Encoder().to(DEVICE)
     optical_encoder = Encoder().to(DEVICE)
 
-    sar_encoder.load_state_dict(torch.load(SAR_MODEL, map_location=DEVICE))
-    optical_encoder.load_state_dict(torch.load(OPTICAL_MODEL, map_location=DEVICE))
+    sar_encoder.load_state_dict(load_checkpoint(SAR_MODEL))
+    optical_encoder.load_state_dict(load_checkpoint(OPTICAL_MODEL))
 
     sar_encoder.eval()
     optical_encoder.eval()
@@ -111,6 +128,13 @@ def load_models():
     OPTICAL_ENCODER = optical_encoder
 
     return SAR_ENCODER, OPTICAL_ENCODER
+
+
+def load_checkpoint(path):
+    try:
+        return torch.load(path, map_location=DEVICE, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=DEVICE)
 
 
 def cache_is_valid(files, optical_dir):
@@ -138,7 +162,16 @@ def build_optical_database(optical_encoder, optical_dir, files, limit=None, refr
     selected_files = files[:limit] if limit else files
 
     if not refresh_cache and cache_is_valid(selected_files, optical_dir):
-        return selected_files, torch.load(EMBEDDING_CACHE_PATH, map_location="cpu")
+        embeddings = torch.load(EMBEDDING_CACHE_PATH, map_location="cpu")
+        if (
+            not isinstance(embeddings, torch.Tensor)
+            or embeddings.ndim != 2
+            or embeddings.shape[0] != len(selected_files)
+            or embeddings.shape[1] != 256
+        ):
+            refresh_cache = True
+        else:
+            return selected_files, embeddings
 
     embeddings = []
 
@@ -156,7 +189,7 @@ def build_optical_database(optical_encoder, optical_dir, files, limit=None, refr
 
     embeddings = torch.cat(embeddings, dim=0)
 
-    SAVE_DIR.mkdir(exist_ok=True)
+    SAVE_DIR.mkdir(parents=True, exist_ok=True)
     torch.save(embeddings, EMBEDDING_CACHE_PATH)
     EMBEDDING_FILES_LIST.write_text("\n".join(selected_files) + "\n", encoding="utf-8")
     CACHE_METADATA_PATH.write_text(
@@ -264,7 +297,13 @@ def health():
         "status": "ok",
         "device": DEVICE.type,
         "models_loaded": SAR_ENCODER is not None and OPTICAL_ENCODER is not None,
+        "metrics": metrics_snapshot(),
     })
+
+
+@app.route("/api/metrics", methods=["GET"])
+def metrics():
+    return jsonify(metrics_snapshot())
 
 
 @app.route("/api/status", methods=["GET"])
@@ -348,6 +387,7 @@ def retrieve():
         refresh_cache = str(payload.get("refresh_cache", "false")).lower() == "true"
 
         started_at = time.perf_counter()
+        QUERY_METRICS["total_queries"] += 1
         query_name, results = retrieve_matches(
             query_file=query_file,
             uploaded_file=uploaded_file,
@@ -356,12 +396,15 @@ def retrieve():
             refresh_cache=refresh_cache,
         )
 
+        latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        QUERY_METRICS["successful_queries"] += 1
+        QUERY_METRICS["recent_latency_ms"].append(latency_ms)
         return jsonify({
             "query": query_name,
             "count": len(results),
             "results": results,
             "database_connected": True,
-            "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            "latency_ms": latency_ms,
         })
 
     except (TypeError, ValueError) as exc:
@@ -369,6 +412,7 @@ def retrieve():
     except FileNotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
     except Exception as exc:
+        QUERY_METRICS["failed_queries"] += 1
         app.logger.exception("Retrieval failed")
         return jsonify({"error": str(exc)}), 500
 
