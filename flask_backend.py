@@ -118,8 +118,8 @@ def load_models():
     sar_encoder = Encoder().to(DEVICE)
     optical_encoder = Encoder().to(DEVICE)
 
-    sar_encoder.load_state_dict(torch.load(SAR_MODEL, map_location=DEVICE))
-    optical_encoder.load_state_dict(torch.load(OPTICAL_MODEL, map_location=DEVICE))
+    sar_encoder.load_state_dict(load_checkpoint(SAR_MODEL))
+    optical_encoder.load_state_dict(load_checkpoint(OPTICAL_MODEL))
 
     sar_encoder.eval()
     optical_encoder.eval()
@@ -128,6 +128,13 @@ def load_models():
     OPTICAL_ENCODER = optical_encoder
 
     return SAR_ENCODER, OPTICAL_ENCODER
+
+
+def load_checkpoint(path):
+    try:
+        return torch.load(path, map_location=DEVICE, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=DEVICE)
 
 
 def cache_is_valid(files, optical_dir):
@@ -155,7 +162,16 @@ def build_optical_database(optical_encoder, optical_dir, files, limit=None, refr
     selected_files = files[:limit] if limit else files
 
     if not refresh_cache and cache_is_valid(selected_files, optical_dir):
-        return selected_files, torch.load(EMBEDDING_CACHE_PATH, map_location="cpu")
+        embeddings = torch.load(EMBEDDING_CACHE_PATH, map_location="cpu")
+        if (
+            not isinstance(embeddings, torch.Tensor)
+            or embeddings.ndim != 2
+            or embeddings.shape[0] != len(selected_files)
+            or embeddings.shape[1] != 256
+        ):
+            refresh_cache = True
+        else:
+            return selected_files, embeddings
 
     embeddings = []
 
@@ -173,7 +189,7 @@ def build_optical_database(optical_encoder, optical_dir, files, limit=None, refr
 
     embeddings = torch.cat(embeddings, dim=0)
 
-    SAVE_DIR.mkdir(exist_ok=True)
+    SAVE_DIR.mkdir(parents=True, exist_ok=True)
     torch.save(embeddings, EMBEDDING_CACHE_PATH)
     EMBEDDING_FILES_LIST.write_text("\n".join(selected_files) + "\n", encoding="utf-8")
     CACHE_METADATA_PATH.write_text(
