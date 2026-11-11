@@ -1,6 +1,7 @@
 import os
 import json
 import time
+from collections import deque
 from pathlib import Path
 
 import torch
@@ -31,6 +32,12 @@ BATCH_SIZE = 64 if DEVICE.type == "cuda" else 32
 
 SAR_ENCODER = None
 OPTICAL_ENCODER = None
+QUERY_METRICS = {
+    "total_queries": 0,
+    "successful_queries": 0,
+    "failed_queries": 0,
+    "recent_latency_ms": deque(maxlen=50),
+}
 
 
 @app.route("/")
@@ -49,6 +56,16 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     return response
+
+
+def metrics_snapshot():
+    latencies = list(QUERY_METRICS["recent_latency_ms"])
+    return {
+        "total_queries": QUERY_METRICS["total_queries"],
+        "successful_queries": QUERY_METRICS["successful_queries"],
+        "failed_queries": QUERY_METRICS["failed_queries"],
+        "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else None,
+    }
 
 
 TRANSFORM_SAR = transforms.Compose([
@@ -264,7 +281,13 @@ def health():
         "status": "ok",
         "device": DEVICE.type,
         "models_loaded": SAR_ENCODER is not None and OPTICAL_ENCODER is not None,
+        "metrics": metrics_snapshot(),
     })
+
+
+@app.route("/api/metrics", methods=["GET"])
+def metrics():
+    return jsonify(metrics_snapshot())
 
 
 @app.route("/api/status", methods=["GET"])
@@ -348,6 +371,7 @@ def retrieve():
         refresh_cache = str(payload.get("refresh_cache", "false")).lower() == "true"
 
         started_at = time.perf_counter()
+        QUERY_METRICS["total_queries"] += 1
         query_name, results = retrieve_matches(
             query_file=query_file,
             uploaded_file=uploaded_file,
@@ -356,12 +380,15 @@ def retrieve():
             refresh_cache=refresh_cache,
         )
 
+        latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        QUERY_METRICS["successful_queries"] += 1
+        QUERY_METRICS["recent_latency_ms"].append(latency_ms)
         return jsonify({
             "query": query_name,
             "count": len(results),
             "results": results,
             "database_connected": True,
-            "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+            "latency_ms": latency_ms,
         })
 
     except (TypeError, ValueError) as exc:
@@ -369,6 +396,7 @@ def retrieve():
     except FileNotFoundError as exc:
         return jsonify({"error": str(exc)}), 404
     except Exception as exc:
+        QUERY_METRICS["failed_queries"] += 1
         app.logger.exception("Retrieval failed")
         return jsonify({"error": str(exc)}), 500
 
