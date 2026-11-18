@@ -81,11 +81,10 @@ class SAROpticalDataset(Dataset):
         sar_path = os.path.join(self.sar_dir, filename)
         optical_path = os.path.join(self.optical_dir, filename)
 
-        sar_img = Image.open(sar_path).convert('L')
-        optical_img = Image.open(optical_path).convert('RGB')
-
-        sar_img = self.transform_sar(sar_img)
-        optical_img = self.transform_optical(optical_img)
+        with Image.open(sar_path) as img:
+            sar_img = self.transform_sar(img.convert('L'))
+        with Image.open(optical_path) as img:
+            optical_img = self.transform_optical(img.convert('RGB'))
 
         return sar_img, optical_img, filename
 
@@ -116,15 +115,15 @@ class Encoder(nn.Module):
 
 def contrastive_loss(sar_embed, optical_embed, temperature=0.07):
     logits = torch.matmul(sar_embed, optical_embed.T) / temperature
-    labels = torch.arange(logits.size(0), device=DEVICE)
+    labels = torch.arange(logits.size(0), device=logits.device)
     loss_sar_to_optical = F.cross_entropy(logits, labels)
     loss_optical_to_sar = F.cross_entropy(logits.T, labels)
     return (loss_sar_to_optical + loss_optical_to_sar) / 2
 
 
-def train(epochs=DEFAULT_EPOCHS, max_samples=MAX_TRAIN_SAMPLES):
+def train(epochs=DEFAULT_EPOCHS, max_samples=MAX_TRAIN_SAMPLES, batch_size=BATCH_SIZE, lr=1e-4):
     sar_dir, optical_dir = get_data_dirs()
-    SAVE_DIR.mkdir(exist_ok=True)
+    SAVE_DIR.mkdir(parents=True, exist_ok=True)
     dataset = SAROpticalDataset(sar_dir, optical_dir)
 
     if max_samples is not None and len(dataset) > max_samples:
@@ -133,14 +132,14 @@ def train(epochs=DEFAULT_EPOCHS, max_samples=MAX_TRAIN_SAMPLES):
 
     print(f'Using device: {DEVICE}')
     print(f'Dataset size: {len(dataset)} paired images')
-    print(f'Epochs: {epochs}, Batch size: {BATCH_SIZE}')
+    print(f'Epochs: {epochs}, Batch size: {batch_size}, LR: {lr}')
 
     if DEVICE.type == 'cuda':
         torch.backends.cudnn.benchmark = True
 
     dataloader = DataLoader(
         dataset,
-        batch_size=BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=NUM_WORKERS,
         pin_memory=PIN_MEMORY,
@@ -151,7 +150,7 @@ def train(epochs=DEFAULT_EPOCHS, max_samples=MAX_TRAIN_SAMPLES):
 
     optimizer = torch.optim.Adam(
         list(sar_encoder.parameters()) + list(optical_encoder.parameters()),
-        lr=1e-4
+        lr=lr
     )
 
     for epoch in range(epochs):
@@ -160,21 +159,21 @@ def train(epochs=DEFAULT_EPOCHS, max_samples=MAX_TRAIN_SAMPLES):
         total_loss = 0.0
 
         for sar_imgs, optical_imgs, _ in tqdm(dataloader, desc=f'Epoch {epoch+1}/{epochs}'):
-            sar_imgs = sar_imgs.to(DEVICE)
-            optical_imgs = optical_imgs.to(DEVICE)
+            sar_imgs = sar_imgs.to(DEVICE, non_blocking=PIN_MEMORY)
+            optical_imgs = optical_imgs.to(DEVICE, non_blocking=PIN_MEMORY)
 
             sar_embed = sar_encoder(sar_imgs)
             optical_embed = optical_encoder(optical_imgs)
 
             loss = contrastive_loss(sar_embed, optical_embed)
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
 
         avg_loss = total_loss / len(dataloader)
-        print(f'Epoch [{epoch+1}/{EPOCHS}] Loss: {avg_loss:.4f}')
+        print(f'Epoch [{epoch+1}/{epochs}] Loss: {avg_loss:.4f}')
 
         torch.save(sar_encoder.state_dict(), SAVE_DIR / 'sar_encoder.pth')
         torch.save(optical_encoder.state_dict(), SAVE_DIR / 'optical_encoder.pth')
@@ -186,9 +185,20 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train the GeoSat dual encoder.')
     parser.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS)
     parser.add_argument('--max-samples', type=int, default=MAX_TRAIN_SAMPLES)
+    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
+    parser.add_argument('--lr', type=float, default=1e-4)
     args = parser.parse_args()
     if args.epochs < 1:
         parser.error('--epochs must be at least 1')
     if args.max_samples is not None and args.max_samples < 1:
         parser.error('--max-samples must be at least 1')
-    train(epochs=args.epochs, max_samples=args.max_samples)
+    if args.batch_size < 1:
+        parser.error('--batch-size must be at least 1')
+    if args.lr <= 0:
+        parser.error('--lr must be positive')
+    train(
+        epochs=args.epochs,
+        max_samples=args.max_samples,
+        batch_size=args.batch_size,
+        lr=args.lr,
+    )
