@@ -1,16 +1,27 @@
-import os
 import json
+import logging
+import os
+import tempfile
+import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 import torch
+import torch.nn.functional as F
 from flask import Flask, jsonify, request, send_file
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from torchvision import transforms
 
 from train import Encoder
 
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("geosat.backend")
 
 app = Flask(__name__)
 
@@ -27,45 +38,42 @@ EMBEDDING_CACHE_PATH = SAVE_DIR / "optical_embeddings.pt"
 EMBEDDING_FILES_LIST = SAVE_DIR / "optical_files.txt"
 CACHE_METADATA_PATH = SAVE_DIR / "optical_cache.json"
 
+EMBEDDING_DIM = 256
+DEFAULT_TOP_K = 6
+MAX_TOP_K = 100
+DEFAULT_LIMIT = 2000
+VALID_IMAGE_EXTENSIONS = frozenset({
+    ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff",
+})
+
+MAX_UPLOAD_MB = max(1, int(os.environ.get("GEOSAT_MAX_UPLOAD_MB", 25)))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+CORS_ALLOW_ORIGIN = os.environ.get("GEOSAT_CORS_ORIGINS", "*")
+
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BATCH_SIZE = 64 if DEVICE.type == "cuda" else 32
 
-SAR_ENCODER = None
-OPTICAL_ENCODER = None
-QUERY_METRICS = {
+_MODEL_LOCK = threading.Lock()
+_CACHE_LOCK = threading.Lock()
+_METRICS_LOCK = threading.Lock()
+
+SAR_ENCODER: Encoder | None = None
+OPTICAL_ENCODER: Encoder | None = None
+_OPTICAL_CACHE: dict[str, Any] = {
+    "optical_dir": None,
+    "files": None,
+    "embeddings": None,
+    "model_signature": None,
+}
+
+QUERY_METRICS: dict[str, Any] = {
     "total_queries": 0,
     "successful_queries": 0,
     "failed_queries": 0,
     "recent_latency_ms": deque(maxlen=50),
 }
-
-
-@app.route("/")
-def home():
-    return jsonify({
-        "status": "running",
-        "message": "GeoSat Backend API is Live",
-        "health": "/api/health",
-        "status_api": "/api/status"
-    })
-
-
-@app.after_request
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-    return response
-
-
-def metrics_snapshot():
-    latencies = list(QUERY_METRICS["recent_latency_ms"])
-    return {
-        "total_queries": QUERY_METRICS["total_queries"],
-        "successful_queries": QUERY_METRICS["successful_queries"],
-        "failed_queries": QUERY_METRICS["failed_queries"],
-        "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else None,
-    }
 
 
 TRANSFORM_SAR = transforms.Compose([
@@ -82,7 +90,126 @@ TRANSFORM_OPTICAL = transforms.Compose([
 ])
 
 
-def get_data_dirs():
+@app.route("/")
+def home():
+    return jsonify({
+        "status": "running",
+        "message": "GeoSat Backend API is Live",
+        "health": "/api/health",
+        "status_api": "/api/status",
+    })
+
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = CORS_ALLOW_ORIGIN
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    return response
+
+
+@app.errorhandler(404)
+def handle_not_found(_exc):
+    return jsonify({"error": "Endpoint not found."}), 404
+
+
+@app.errorhandler(405)
+def handle_method_not_allowed(_exc):
+    return jsonify({"error": "Method not allowed."}), 405
+
+
+@app.errorhandler(413)
+def handle_payload_too_large(_exc):
+    return jsonify({
+        "error": f"Uploaded file exceeds maximum allowed size of {MAX_UPLOAD_MB} MB."
+    }), 413
+
+
+def _record_query_result(success: bool, latency_ms: float | None = None) -> None:
+    with _METRICS_LOCK:
+        QUERY_METRICS["total_queries"] += 1
+        if success:
+            QUERY_METRICS["successful_queries"] += 1
+            if latency_ms is not None:
+                QUERY_METRICS["recent_latency_ms"].append(latency_ms)
+        else:
+            QUERY_METRICS["failed_queries"] += 1
+
+
+def metrics_snapshot() -> dict[str, Any]:
+    with _METRICS_LOCK:
+        latencies = list(QUERY_METRICS["recent_latency_ms"])
+        total = QUERY_METRICS["total_queries"]
+        successful = QUERY_METRICS["successful_queries"]
+        failed = QUERY_METRICS["failed_queries"]
+
+    return {
+        "total_queries": total,
+        "successful_queries": successful,
+        "failed_queries": failed,
+        "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else None,
+        "last_latency_ms": latencies[-1] if latencies else None,
+    }
+
+
+def _file_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
+def _parse_int(value: Any, name: str, min_value: int | None = None, max_value: int | None = None) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer.")
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{name} must be an integer.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer.") from exc
+
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{name} must be an integer.")
+    if min_value is not None and parsed < min_value:
+        if max_value is not None:
+            raise ValueError(f"{name} must be between {min_value} and {max_value}.")
+        raise ValueError(f"{name} must be at least {min_value}.")
+    if max_value is not None and parsed > max_value:
+        if min_value is not None:
+            raise ValueError(f"{name} must be between {min_value} and {max_value}.")
+        raise ValueError(f"{name} must be at most {max_value}.")
+    return parsed
+
+
+def _parse_limit(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in {"none", "all"}:
+            return None
+        if not cleaned:
+            raise ValueError("limit must be at least 1, 'none', or 'all'.")
+    return _parse_int(value, "limit", min_value=1)
+
+
+def _parse_bool(value: Any, name: str = "refresh_cache") -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in {"true", "1", "yes"}:
+            return True
+        if cleaned in {"false", "0", "no"}:
+            return False
+    raise ValueError(f"{name} must be a boolean ('true' or 'false').")
+
+
+def get_data_dirs() -> tuple[Path | None, Path | None]:
     if SAR_DIR.is_dir() and OPTICAL_DIR.is_dir():
         return SAR_DIR, OPTICAL_DIR
     if PAIRED_DIR.is_dir():
@@ -90,163 +217,331 @@ def get_data_dirs():
     return None, None
 
 
-def list_images(directory):
+def list_images(directory: Path | None) -> list[str]:
     if directory is None or not directory.is_dir():
         return []
 
-    valid = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-
-    return sorted([
+    return sorted(
         p.name
         for p in directory.iterdir()
-        if p.is_file() and p.suffix.lower() in valid
-    ])
+        if p.is_file() and p.suffix.lower() in VALID_IMAGE_EXTENSIONS
+    )
 
 
-def load_models():
+def resolve_safe_image_path(directory: Path | None, filename: str | None) -> Path | None:
+    if directory is None or not filename or not isinstance(filename, str):
+        return None
+    if Path(filename).name != filename:
+        return None
+
+    resolved_dir = directory.resolve()
+    image_path = (resolved_dir / filename).resolve()
+    if (
+        image_path.parent != resolved_dir
+        or not image_path.is_file()
+        or image_path.suffix.lower() not in VALID_IMAGE_EXTENSIONS
+    ):
+        return None
+    return image_path
+
+
+def load_checkpoint(path: Path, map_location: Any = None):
+    target_device = DEVICE if map_location is None else map_location
+    try:
+        return torch.load(path, map_location=target_device, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=target_device)
+
+
+def load_models() -> tuple[Encoder, Encoder]:
     global SAR_ENCODER, OPTICAL_ENCODER
 
     if SAR_ENCODER is not None and OPTICAL_ENCODER is not None:
         return SAR_ENCODER, OPTICAL_ENCODER
 
-    if not SAR_MODEL.exists():
-        raise FileNotFoundError(f"SAR model not found: {SAR_MODEL}")
+    with _MODEL_LOCK:
+        if SAR_ENCODER is not None and OPTICAL_ENCODER is not None:
+            return SAR_ENCODER, OPTICAL_ENCODER
 
-    if not OPTICAL_MODEL.exists():
-        raise FileNotFoundError(f"Optical model not found: {OPTICAL_MODEL}")
+        if not SAR_MODEL.exists():
+            raise FileNotFoundError(f"SAR model not found: {SAR_MODEL}")
+        if not OPTICAL_MODEL.exists():
+            raise FileNotFoundError(f"Optical model not found: {OPTICAL_MODEL}")
 
-    sar_encoder = Encoder().to(DEVICE)
-    optical_encoder = Encoder().to(DEVICE)
+        started_at = time.perf_counter()
+        sar_encoder = Encoder(embedding_dim=EMBEDDING_DIM).to(DEVICE)
+        optical_encoder = Encoder(embedding_dim=EMBEDDING_DIM).to(DEVICE)
 
-    sar_encoder.load_state_dict(load_checkpoint(SAR_MODEL))
-    optical_encoder.load_state_dict(load_checkpoint(OPTICAL_MODEL))
+        sar_encoder.load_state_dict(load_checkpoint(SAR_MODEL))
+        optical_encoder.load_state_dict(load_checkpoint(OPTICAL_MODEL))
 
-    sar_encoder.eval()
-    optical_encoder.eval()
+        sar_encoder.eval()
+        optical_encoder.eval()
 
-    SAR_ENCODER = sar_encoder
-    OPTICAL_ENCODER = optical_encoder
+        SAR_ENCODER = sar_encoder
+        OPTICAL_ENCODER = optical_encoder
 
-    return SAR_ENCODER, OPTICAL_ENCODER
-
-
-def load_checkpoint(path):
-    try:
-        return torch.load(path, map_location=DEVICE, weights_only=True)
-    except TypeError:
-        return torch.load(path, map_location=DEVICE)
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        logger.info("Loaded SAR and optical encoders on %s in %.2f ms", DEVICE.type, elapsed_ms)
+        return SAR_ENCODER, OPTICAL_ENCODER
 
 
-def cache_is_valid(files, optical_dir):
+def _read_disk_cache_manifest(
+    files: list[str],
+    optical_dir: Path,
+) -> list[str] | None:
     if (
         not EMBEDDING_CACHE_PATH.exists()
         or not EMBEDDING_FILES_LIST.exists()
         or not CACHE_METADATA_PATH.exists()
     ):
-        return False
+        return None
 
-    cached_files = EMBEDDING_FILES_LIST.read_text(encoding="utf-8").splitlines()
     try:
+        cached_files = [
+            line for line in EMBEDDING_FILES_LIST.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
         metadata = json.loads(CACHE_METADATA_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
+        return None
 
-    return (
-        cached_files == files
-        and metadata.get("optical_dir") == str(optical_dir.resolve())
-        and metadata.get("embedding_dimension") == 256
-    )
+    if metadata.get("optical_dir") != str(optical_dir.resolve()):
+        return None
+    if metadata.get("embedding_dimension") != EMBEDDING_DIM:
+        return None
+
+    model_sig = _file_signature(OPTICAL_MODEL)
+    recorded_mtime = metadata.get("optical_model_mtime_ns")
+    recorded_size = metadata.get("optical_model_size")
+    if model_sig is not None and recorded_mtime is not None and recorded_mtime != model_sig[0]:
+        return None
+    if model_sig is not None and recorded_size is not None and recorded_size != model_sig[1]:
+        return None
+
+    if len(cached_files) >= len(files) and cached_files[:len(files)] == files:
+        return cached_files
+    return None
 
 
-def build_optical_database(optical_encoder, optical_dir, files, limit=None, refresh_cache=False):
-    selected_files = files[:limit] if limit else files
+def cache_is_valid(files: list[str], optical_dir: Path) -> bool:
+    return _read_disk_cache_manifest(files, optical_dir) is not None
 
-    if not refresh_cache and cache_is_valid(selected_files, optical_dir):
-        embeddings = torch.load(EMBEDDING_CACHE_PATH, map_location="cpu")
-        if (
-            not isinstance(embeddings, torch.Tensor)
-            or embeddings.ndim != 2
-            or embeddings.shape[0] != len(selected_files)
-            or embeddings.shape[1] != 256
-        ):
-            refresh_cache = True
-        else:
-            return selected_files, embeddings
 
-    embeddings = []
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
-    with torch.no_grad():
-        for start in range(0, len(selected_files), BATCH_SIZE):
-            batch_files = selected_files[start:start + BATCH_SIZE]
-            batch_images = []
 
-            for filename in batch_files:
-                img = Image.open(optical_dir / filename).convert("RGB")
-                batch_images.append(TRANSFORM_OPTICAL(img))
+def _atomic_save_tensor(path: Path, tensor: torch.Tensor) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        torch.save(tensor, tmp_path)
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
-            batch_tensor = torch.stack(batch_images).to(DEVICE)
-            embeddings.append(optical_encoder(batch_tensor).cpu())
 
-    embeddings = torch.cat(embeddings, dim=0)
+def _set_memory_cache(
+    optical_dir: Path,
+    files: list[str],
+    embeddings: torch.Tensor,
+    model_sig: tuple[int, int] | None,
+) -> torch.Tensor:
+    device_embeddings = F.normalize(embeddings.to(device=DEVICE, dtype=torch.float32), dim=1)
+    _OPTICAL_CACHE["optical_dir"] = str(optical_dir.resolve())
+    _OPTICAL_CACHE["files"] = list(files)
+    _OPTICAL_CACHE["embeddings"] = device_embeddings
+    _OPTICAL_CACHE["model_signature"] = model_sig
+    return device_embeddings
 
-    SAVE_DIR.mkdir(parents=True, exist_ok=True)
-    torch.save(embeddings, EMBEDDING_CACHE_PATH)
-    EMBEDDING_FILES_LIST.write_text("\n".join(selected_files) + "\n", encoding="utf-8")
-    CACHE_METADATA_PATH.write_text(
-        json.dumps({
+
+def _get_memory_cache(
+    optical_dir: Path,
+    selected_files: list[str],
+    model_sig: tuple[int, int] | None,
+) -> tuple[list[str], torch.Tensor] | None:
+    cached_files = _OPTICAL_CACHE["files"]
+    cached_embeddings = _OPTICAL_CACHE["embeddings"]
+    if (
+        cached_files is None
+        or cached_embeddings is None
+        or _OPTICAL_CACHE["optical_dir"] != str(optical_dir.resolve())
+        or _OPTICAL_CACHE["model_signature"] != model_sig
+    ):
+        return None
+    if len(cached_files) >= len(selected_files) and cached_files[:len(selected_files)] == selected_files:
+        return selected_files, cached_embeddings[:len(selected_files)]
+    return None
+
+
+def _is_memory_cache_loaded() -> bool:
+    return _OPTICAL_CACHE["embeddings"] is not None
+
+
+def clear_memory_cache() -> None:
+    with _CACHE_LOCK:
+        _OPTICAL_CACHE["optical_dir"] = None
+        _OPTICAL_CACHE["files"] = None
+        _OPTICAL_CACHE["embeddings"] = None
+        _OPTICAL_CACHE["model_signature"] = None
+
+
+def build_optical_database(
+    optical_encoder: Encoder,
+    optical_dir: Path,
+    files: list[str],
+    limit: int | None = None,
+    refresh_cache: bool = False,
+) -> tuple[list[str], torch.Tensor]:
+    selected_files = files[:limit] if limit is not None else list(files)
+    if not selected_files:
+        raise RuntimeError(f"No optical images available to index in {optical_dir}")
+
+    model_sig = _file_signature(OPTICAL_MODEL)
+
+    with _CACHE_LOCK:
+        if not refresh_cache:
+            memory_hit = _get_memory_cache(optical_dir, selected_files, model_sig)
+            if memory_hit is not None:
+                return memory_hit
+
+            cached_files = _read_disk_cache_manifest(selected_files, optical_dir)
+            if cached_files is not None:
+                try:
+                    disk_embeddings = load_checkpoint(EMBEDDING_CACHE_PATH, map_location="cpu")
+                except Exception:
+                    logger.warning("Failed to load cached embeddings from disk; rebuilding cache.")
+                    disk_embeddings = None
+
+                if (
+                    isinstance(disk_embeddings, torch.Tensor)
+                    and disk_embeddings.ndim == 2
+                    and disk_embeddings.shape[0] == len(cached_files)
+                    and disk_embeddings.shape[1] == EMBEDDING_DIM
+                ):
+                    logger.info(
+                        "Loaded %d optical embeddings from disk cache into %s memory",
+                        len(cached_files),
+                        DEVICE.type,
+                    )
+                    device_embeddings = _set_memory_cache(
+                        optical_dir, cached_files, disk_embeddings, model_sig
+                    )
+                    return selected_files, device_embeddings[:len(selected_files)]
+
+        logger.info("Computing optical embeddings for %d images...", len(selected_files))
+        started_at = time.perf_counter()
+        embedding_batches: list[torch.Tensor] = []
+
+        with torch.inference_mode():
+            for start in range(0, len(selected_files), BATCH_SIZE):
+                batch_files = selected_files[start:start + BATCH_SIZE]
+                batch_images = []
+
+                for filename in batch_files:
+                    image_path = optical_dir / filename
+                    try:
+                        with Image.open(image_path) as img:
+                            batch_images.append(TRANSFORM_OPTICAL(img.convert("RGB")))
+                    except (OSError, UnidentifiedImageError) as exc:
+                        raise RuntimeError(f"Failed to read optical image '{filename}': {exc}") from exc
+
+                batch_tensor = torch.stack(batch_images).to(DEVICE)
+                embedding_batches.append(optical_encoder(batch_tensor).cpu())
+
+        cpu_embeddings = torch.cat(embedding_batches, dim=0)
+
+        metadata = {
             "optical_dir": str(optical_dir.resolve()),
-            "embedding_dimension": int(embeddings.shape[1]),
+            "embedding_dimension": int(cpu_embeddings.shape[1]),
             "count": len(selected_files),
-        }, indent=2) + "\n",
-        encoding="utf-8",
-    )
+            "optical_model_mtime_ns": model_sig[0] if model_sig is not None else None,
+            "optical_model_size": model_sig[1] if model_sig is not None else None,
+        }
 
-    return selected_files, embeddings
+        _atomic_save_tensor(EMBEDDING_CACHE_PATH, cpu_embeddings)
+        _atomic_write_text(EMBEDDING_FILES_LIST, "\n".join(selected_files) + "\n")
+        _atomic_write_text(CACHE_METADATA_PATH, json.dumps(metadata, indent=2) + "\n")
+
+        device_embeddings = _set_memory_cache(optical_dir, selected_files, cpu_embeddings, model_sig)
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        logger.info("Built and cached %d optical embeddings in %.2f ms", len(selected_files), elapsed_ms)
+
+        return selected_files, device_embeddings
 
 
-def score_to_percent(score):
+def score_to_percent(score: float | torch.Tensor) -> int:
     return max(0, min(100, round(float(score) * 100)))
 
 
-def encode_query_image(sar_encoder, sar_dir, query_file=None, uploaded_file=None):
-    if uploaded_file:
-        img = Image.open(uploaded_file).convert("L")
-        query_name = uploaded_file.filename or "uploaded_query"
+def encode_query_image(
+    sar_encoder: Encoder,
+    sar_dir: Path,
+    query_file: str | None = None,
+    uploaded_file: Any = None,
+) -> tuple[str, torch.Tensor]:
+    if uploaded_file is not None:
+        raw_name = getattr(uploaded_file, "filename", None) or "uploaded_query"
+        query_name = Path(raw_name.replace("\\", "/")).name or "uploaded_query"
+        stream = getattr(uploaded_file, "stream", uploaded_file)
+        if hasattr(stream, "seek"):
+            stream.seek(0)
+        try:
+            with Image.open(uploaded_file) as img:
+                tensor = TRANSFORM_SAR(img.convert("L")).unsqueeze(0).to(DEVICE)
+        except (UnidentifiedImageError, Image.DecompressionBombError, OSError) as exc:
+            raise ValueError("Uploaded file is not a valid or readable image.") from exc
     else:
         if not query_file:
             raise ValueError("Provide query_file or upload an image file.")
 
-        image_path = (sar_dir / query_file).resolve()
-
-        if sar_dir not in image_path.parents or not image_path.is_file():
+        image_path = resolve_safe_image_path(sar_dir, query_file)
+        if image_path is None:
             raise FileNotFoundError(f"Query image not found: {query_file}")
 
-        img = Image.open(image_path).convert("L")
+        try:
+            with Image.open(image_path) as img:
+                tensor = TRANSFORM_SAR(img.convert("L")).unsqueeze(0).to(DEVICE)
+        except (UnidentifiedImageError, Image.DecompressionBombError, OSError) as exc:
+            raise ValueError(f"Query image '{query_file}' could not be decoded.") from exc
         query_name = query_file
 
-    tensor = TRANSFORM_SAR(img).unsqueeze(0).to(DEVICE)
-
-    with torch.no_grad():
-        embedding = sar_encoder(tensor)
+    with torch.inference_mode():
+        embedding = F.normalize(sar_encoder(tensor).to(dtype=torch.float32), dim=1)
 
     return query_name, embedding
 
 
-def retrieve_matches(query_file=None, uploaded_file=None, k=6, limit=2000, refresh_cache=False):
-    if k < 1 or k > 100:
-        raise ValueError("k must be between 1 and 100.")
-    if limit is not None and limit < 1:
-        raise ValueError("limit must be at least 1.")
+def retrieve_matches(
+    query_file: str | None = None,
+    uploaded_file: Any = None,
+    k: int = DEFAULT_TOP_K,
+    limit: int | None = DEFAULT_LIMIT,
+    refresh_cache: bool = False,
+) -> tuple[str, list[dict[str, Any]]]:
+    k = _parse_int(k, "k", min_value=1, max_value=MAX_TOP_K)
+    limit = _parse_limit(limit)
 
     sar_dir, optical_dir = get_data_dirs()
-
     if sar_dir is None or optical_dir is None:
         raise FileNotFoundError(
             "Dataset not found. Add data/SAR + data/Optical or data/Paired_SAR_Optical_images."
         )
 
     optical_files = list_images(optical_dir)
-
     if not optical_files:
         raise RuntimeError(f"No optical images found in {optical_dir}")
 
@@ -255,8 +550,8 @@ def retrieve_matches(query_file=None, uploaded_file=None, k=6, limit=2000, refre
     query_name, query_embedding = encode_query_image(
         sar_encoder,
         sar_dir,
-        query_file,
-        uploaded_file
+        query_file=query_file,
+        uploaded_file=uploaded_file,
     )
 
     indexed_files, optical_embeddings = build_optical_database(
@@ -267,19 +562,17 @@ def retrieve_matches(query_file=None, uploaded_file=None, k=6, limit=2000, refre
         refresh_cache=refresh_cache,
     )
 
-    optical_embeddings = optical_embeddings.to(DEVICE)
-    similarities = torch.matmul(query_embedding, optical_embeddings.T).squeeze(0)
-
-    top_scores, top_indices = torch.topk(
-        similarities,
-        min(k, len(indexed_files))
-    )
+    with torch.inference_mode():
+        similarities = torch.matmul(
+            query_embedding,
+            optical_embeddings.to(device=DEVICE, dtype=query_embedding.dtype).T,
+        ).squeeze(0)
+        top_k = min(k, len(indexed_files))
+        top_scores, top_indices = torch.topk(similarities, top_k)
 
     results = []
-
-    for rank, (score, idx) in enumerate(zip(top_scores, top_indices), start=1):
-        filename = indexed_files[int(idx)]
-
+    for rank, (score, idx) in enumerate(zip(top_scores.tolist(), top_indices.tolist()), start=1):
+        filename = indexed_files[idx]
         results.append({
             "rank": rank,
             "filename": filename,
@@ -297,6 +590,7 @@ def health():
         "status": "ok",
         "device": DEVICE.type,
         "models_loaded": SAR_ENCODER is not None and OPTICAL_ENCODER is not None,
+        "cache_loaded_in_memory": _is_memory_cache_loaded(),
         "metrics": metrics_snapshot(),
     })
 
@@ -311,6 +605,7 @@ def status():
     sar_dir, optical_dir = get_data_dirs()
     sar_files = list_images(sar_dir)
     optical_files = list_images(optical_dir)
+    cache_in_memory = _is_memory_cache_loaded()
 
     return jsonify({
         "device": DEVICE.type,
@@ -319,30 +614,46 @@ def status():
         "optical_images": len(optical_files),
         "sar_model_found": SAR_MODEL.exists(),
         "optical_model_found": OPTICAL_MODEL.exists(),
+        "models_loaded": SAR_ENCODER is not None and OPTICAL_ENCODER is not None,
         "embedding_cache_found": EMBEDDING_CACHE_PATH.exists(),
         "embedding_cache_metadata_found": CACHE_METADATA_PATH.exists(),
-        "database_connected": bool(optical_files and EMBEDDING_CACHE_PATH.exists()),
-        "embedding_dimension": 256,
+        "cache_loaded_in_memory": cache_in_memory,
+        "database_connected": bool(optical_files and (EMBEDDING_CACHE_PATH.exists() or cache_in_memory)),
+        "embedding_dimension": EMBEDDING_DIM,
         "batch_size": BATCH_SIZE,
         "framework": "PyTorch",
     })
 
 
 @app.route("/api/images/<kind>", methods=["GET"])
-def images(kind):
+def images(kind: str):
     sar_dir, optical_dir = get_data_dirs()
 
     if kind == "sar":
-        return jsonify({"kind": kind, "files": list_images(sar_dir)})
+        all_files = list_images(sar_dir)
+    elif kind == "optical":
+        all_files = list_images(optical_dir)
+    else:
+        return jsonify({"error": "kind must be 'sar' or 'optical'"}), 400
 
-    if kind == "optical":
-        return jsonify({"kind": kind, "files": list_images(optical_dir)})
+    try:
+        offset_arg = request.args.get("offset")
+        limit_arg = request.args.get("limit")
+        offset = _parse_int(offset_arg, "offset", min_value=0) if offset_arg is not None else 0
+        limit = _parse_int(limit_arg, "limit", min_value=1) if limit_arg is not None else None
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
-    return jsonify({"error": "kind must be 'sar' or 'optical'"}), 400
+    sliced = all_files[offset:offset + limit] if limit is not None else all_files[offset:]
+    return jsonify({
+        "kind": kind,
+        "total": len(all_files),
+        "files": sliced,
+    })
 
 
 @app.route("/api/image/<kind>/<filename>", methods=["GET"])
-def image(kind, filename):
+def image(kind: str, filename: str):
     sar_dir, optical_dir = get_data_dirs()
 
     if kind == "sar":
@@ -352,15 +663,11 @@ def image(kind, filename):
     else:
         return jsonify({"error": "kind must be 'sar' or 'optical'"}), 400
 
-    image_path = (directory / filename).resolve() if directory else None
-    if (
-        directory is None
-        or directory not in image_path.parents
-        or filename not in list_images(directory)
-    ):
+    image_path = resolve_safe_image_path(directory, filename)
+    if image_path is None:
         return jsonify({"error": "image not found"}), 404
 
-    return send_file(image_path)
+    return send_file(image_path, conditional=True, max_age=3600)
 
 
 @app.route("/api/retrieve", methods=["POST", "OPTIONS"])
@@ -368,26 +675,39 @@ def retrieve():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
 
+    # Parse and validate inputs before starting query execution/metrics.
     try:
         uploaded_file = request.files.get("file")
 
-        if uploaded_file:
-            payload = request.form.to_dict()
+        if uploaded_file is not None:
+            payload: dict[str, Any] = request.form.to_dict()
         else:
-            payload = request.get_json(silent=True) or {}
+            if request.is_json:
+                parsed_json = request.get_json(silent=True)
+                if parsed_json is None:
+                    raise ValueError("Invalid JSON request body.")
+                if not isinstance(parsed_json, dict):
+                    raise ValueError("JSON request body must be an object.")
+                payload = parsed_json
+            else:
+                payload = request.form.to_dict()
 
         query_file = payload.get("query_file")
-        if uploaded_file and not uploaded_file.filename:
+        if uploaded_file is not None and not uploaded_file.filename:
             raise ValueError("Uploaded file must have a filename.")
-        if not uploaded_file and not query_file:
+        if uploaded_file is None and not query_file:
             raise ValueError("Provide query_file or upload an image file.")
-        k = int(payload.get("k", 6))
-        limit_value = payload.get("limit", 2000)
-        limit = None if str(limit_value).lower() in {"none", "all"} else int(limit_value)
-        refresh_cache = str(payload.get("refresh_cache", "false")).lower() == "true"
+        if query_file is not None and not isinstance(query_file, str):
+            raise ValueError("query_file must be a string.")
 
-        started_at = time.perf_counter()
-        QUERY_METRICS["total_queries"] += 1
+        k = _parse_int(payload.get("k", DEFAULT_TOP_K), "k", min_value=1, max_value=MAX_TOP_K)
+        limit = _parse_limit(payload.get("limit", DEFAULT_LIMIT))
+        refresh_cache = _parse_bool(payload.get("refresh_cache", False), "refresh_cache")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    started_at = time.perf_counter()
+    try:
         query_name, results = retrieve_matches(
             query_file=query_file,
             uploaded_file=uploaded_file,
@@ -395,28 +715,35 @@ def retrieve():
             limit=limit,
             refresh_cache=refresh_cache,
         )
-
-        latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
-        QUERY_METRICS["successful_queries"] += 1
-        QUERY_METRICS["recent_latency_ms"].append(latency_ms)
-        return jsonify({
-            "query": query_name,
-            "count": len(results),
-            "results": results,
-            "database_connected": True,
-            "latency_ms": latency_ms,
-        })
-
     except (TypeError, ValueError) as exc:
+        _record_query_result(success=False)
         return jsonify({"error": str(exc)}), 400
     except FileNotFoundError as exc:
+        _record_query_result(success=False)
         return jsonify({"error": str(exc)}), 404
-    except Exception as exc:
-        QUERY_METRICS["failed_queries"] += 1
-        app.logger.exception("Retrieval failed")
+    except RuntimeError as exc:
+        _record_query_result(success=False)
+        logger.warning("Retrieval runtime error: %s", exc)
         return jsonify({"error": str(exc)}), 500
+    except Exception:
+        _record_query_result(success=False)
+        logger.exception("Unexpected retrieval failure")
+        return jsonify({"error": "Internal server error during retrieval."}), 500
+
+    latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    _record_query_result(success=True, latency_ms=latency_ms)
+
+    return jsonify({
+        "query": query_name,
+        "count": len(results),
+        "results": results,
+        "database_connected": True,
+        "latency_ms": latency_ms,
+    })
 
 
 if __name__ == "__main__":
+    host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    debug = os.environ.get("FLASK_DEBUG", "").strip().lower() in {"1", "true", "yes"}
+    app.run(host=host, port=port, debug=debug)
