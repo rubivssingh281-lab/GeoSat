@@ -204,7 +204,7 @@
             clearTimeout(timeout);
 
             if (!response.ok) {
-                const errData = await response.json();
+                const errData = await response.json().catch(() => ({}));
                 throw new Error(errData.error || `HTTP ${response.status}`);
             }
 
@@ -238,8 +238,11 @@
 
         } catch (err) {
             console.error(err);
+            const message = err.name === 'AbortError'
+                ? 'Request timed out. Please try again.'
+                : err.message;
             searchStatus.classList.add('error');
-            document.getElementById('s1').textContent = '❌ Error: ' + err.message;
+            document.getElementById('s1').textContent = '❌ Error: ' + message;
             document.getElementById('s2').textContent = '';
             document.getElementById('s3').textContent = 'Please check console and backend.';
         } finally {
@@ -252,7 +255,7 @@
                           // Render Results
  
     function renderResults(data) {
-        const query = escapeHtml(data.query || 'uploaded image');
+        const query = data.query || 'uploaded image';
         const count = data.count || 0;
         resultsQueryLabel.textContent = `Query · "${query}"`;
         resultsTitle.textContent = `${count} result${count !== 1 ? 's' : ''} found`;
@@ -341,7 +344,7 @@
         selectedResult = res;
 
         // Populate viewer
-        const filename = escapeHtml(res.filename || 'unknown');
+        const filename = res.filename || 'unknown';
         const score = res.match_percent || 0;
         const imageUrl = res.image_url ? `${API_BASE}${encodeURI(res.image_url)}` : '';
 
@@ -372,7 +375,7 @@
         mdSensor.textContent = sensor;
         mdDate.textContent = date;
         mdCoords.textContent = coords;
-        mdCloud.textContent = cloud + '%';
+        mdCloud.textContent = cloud === '—' ? '—' : `${cloud}%`;
         mdRes.textContent = resStr;
 
         // Setup download button
