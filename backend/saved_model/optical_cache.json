@@ -1,0 +1,8 @@
+{
+  "optical_dir": "D:\\GeoSat-main\\backend\\data\\Paired_SAR_Optical_images",
+  "count": 2000,
+  "embedding_dimension": 256,
+  "optical_model_mtime_ns": 1795534734178222000,
+  "optical_model_size": 46363031,
+  "cached_at_epoch": 1795536744
+}
