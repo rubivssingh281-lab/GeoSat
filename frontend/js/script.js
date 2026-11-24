@@ -288,7 +288,7 @@
                         <span class="result-badge cloud">☁ ${cloud}</span>
                         <i class="ti ti-crosshair result-icon" aria-hidden="true"></i>
                         <!-- We'll load the image as background or img -->
-                        <img src="${imageUrl}" style="width:100%;height:100%;object-fit:cover;position:absolute;top:0;left:0;opacity:0.7;" alt="${filename}" onerror="this.style.display='none'" />
+                        <img src="${imageUrl}" style="width:100%;height:100%;object-fit:cover;position:absolute;top:0;left:0;opacity:0.85;" alt="${filename}" onerror="this.src='images/placeholder.svg'; this.style.opacity='0.4';" />
                     </div>
                     <div class="result-body">
                         <div class="result-title">${filename}</div>
@@ -352,9 +352,10 @@
         if (imageUrl) {
             vwImage.src = imageUrl;
             vwImage.style.display = 'block';
-            vwImage.onerror = () => { vwImage.style.display = 'none'; };
+            vwImage.onerror = () => { vwImage.src = 'images/placeholder.svg'; };
         } else {
-            vwImage.style.display = 'none';
+            vwImage.src = 'images/placeholder.svg';
+            vwImage.style.display = 'block';
         }
 
         // Set metadata (extract from filename or use defaults)
