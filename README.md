@@ -23,22 +23,31 @@ GeoSat trains two ResNet18-based encoder networks — one for SAR imagery and on
 
 ```
 .
-├── data/
-│   ├── SAR/                          # SAR images (alternative layout)
-│   ├── Optical/                      # Optical images (alternative layout)
-│   └── Paired_SAR_Optical_images/    # Paired images (single-directory layout)
-├── saved_model/
-│   ├── sar_encoder.pth               # Trained SAR encoder weights
-│   ├── optical_encoder.pth           # Trained optical encoder weights
-│   ├── optical_embeddings.pt         # Cached optical embedding vectors
-│   └── optical_files.txt             # Filename index for the embedding cache
-├── train.py                          # Model training script
-├── test_retrieval.py                 # CLI retrieval evaluation script
-├── flask_backend.py                  # REST API server
-├── index.html                        # Web frontend
-├── script.js                         # Frontend Javascript
-├── styles.css                        # Frontend styles
-└── requirements.txt                  # Dependency list
+├── backend/
+│   ├── data/                         # SAR & Optical satellite images
+│   │   ├── SAR/
+│   │   ├── Optical/
+│   │   └── Paired_SAR_Optical_images/
+│   ├── saved_model/                  # Encoders & 2000-image embedding cache
+│   │   ├── sar_encoder.pth
+│   │   ├── optical_encoder.pth
+│   │   ├── optical_embeddings.pt
+│   │   ├── optical_files.txt
+│   │   └── optical_cache.json
+│   ├── flask_backend.py              # REST API server (port 5000)
+│   ├── train.py                      # Dual-encoder contrastive training
+│   ├── test_retrieval.py             # CLI retrieval evaluation script
+│   └── requirements.txt              # Backend dependencies
+├── frontend/
+│   ├── index.html                    # Decoupled web interface
+│   ├── css/
+│   │   └── styles.css                # Full UI stylesheet
+│   ├── js/
+│   │   └── script.js                 # Frontend API client & dashboard
+│   └── images/                       # UI assets and brand icons
+├── run.bat                           # 1-click launcher for Windows
+├── run.ps1                           # PowerShell launcher
+└── requirements.txt                  # Project dependencies
 ```
 
 ---
@@ -90,7 +99,7 @@ When Layout A directories are not found, the scripts automatically fall back to 
 ## Training
 
 ```bash
-python train.py
+python backend/train.py
 ```
 
 The script trains both encoders end-to-end using a symmetric InfoNCE contrastive loss. Checkpoints are saved to `saved_model/` after each epoch.
@@ -114,16 +123,16 @@ After training, run retrieval from the command line:
 
 ```bash
 # Use the first available SAR image as the query
-python test_retrieval.py
+python backend/test_retrieval.py
 
 # Specify a query image
-python test_retrieval.py --query ROIs1868_summer_s1_59_p10.png
+python backend/test_retrieval.py --query ROIs1868_summer_s1_59_p10.png
 
 # Return top-10 matches, limit the optical index to 1,000 images
-python test_retrieval.py --query <filename> --k 10 --limit 1000
+python backend/test_retrieval.py --query <filename> --k 10 --limit 1000
 
 # Recompute optical embeddings (e.g. after dataset changes)
-python test_retrieval.py --refresh-cache
+python backend/test_retrieval.py --refresh-cache
 ```
 
 **Options**
@@ -144,7 +153,7 @@ Results are displayed with match scores and visualised using `matplotlib`.
 Start the Flask development server:
 
 ```bash
-python flask_backend.py
+python backend/flask_backend.py
 ```
 
 The API runs at `http://127.0.0.1:5000` by default.
@@ -217,8 +226,13 @@ block browser requests):
 
 ```bash
 .venv/bin/python flask_backend.py
-# In a second terminal:
-python -m http.server 8080
+# In a second terminal (serve frontend directory):
+python -m http.server 8080 -d frontend
+```
+
+Or simply launch everything with one click on Windows:
+```cmd
+run.bat
 ```
 
 Open `http://127.0.0.1:8080` to use the GeoSat interface, which provides:
