@@ -14,7 +14,7 @@ from flask import Flask, jsonify, request, send_file
 from PIL import Image, UnidentifiedImageError
 from torchvision import transforms
 
-from train import Encoder
+from train import Encoder, get_device
 
 
 logging.basicConfig(
@@ -52,7 +52,7 @@ CORS_ALLOW_ORIGIN = os.environ.get("GEOSAT_CORS_ORIGINS", "*")
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = get_device()
 BATCH_SIZE = 64 if DEVICE.type == "cuda" else 32
 
 _MODEL_LOCK = threading.Lock()

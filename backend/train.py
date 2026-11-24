@@ -13,7 +13,23 @@ from torchvision import transforms, models
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_DIR / 'data'
 SAVE_DIR = PROJECT_DIR / 'saved_model'
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def get_device() -> torch.device:
+    """Return cuda device if functional for this architecture; fallback to cpu gracefully."""
+    if os.environ.get("GEOSAT_FORCE_CPU", "").strip().lower() in {"1", "true", "yes"}:
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        try:
+            probe = torch.zeros(1, device="cuda")
+            _ = probe + probe
+            return torch.device("cuda")
+        except Exception:
+            return torch.device("cpu")
+    return torch.device("cpu")
+
+
+DEVICE = get_device()
 
 USE_CPU_FALLBACK = DEVICE.type == 'cpu'
 DEFAULT_EPOCHS = 10 if not USE_CPU_FALLBACK else 3
