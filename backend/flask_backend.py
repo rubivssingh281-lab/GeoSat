@@ -228,14 +228,57 @@ def list_images(directory: Path | None) -> list[str]:
     )
 
 
+# Security: Defend against PIL decompression bombs (max 25 Megapixels, approx 5000x5000)
+Image.MAX_IMAGE_PIXELS = 25_000_000
+
+# Magic bytes signatures for supported image types
+MAGIC_BYTES_SIGNATURES: tuple[bytes, ...] = (
+    b"\x89PNG\r\n\x1a\n",             # PNG
+    b"\xff\xd8\xff",                   # JPEG
+    b"BM",                             # BMP
+    b"II*\x00",                        # TIFF (little endian)
+    b"MM\x00*",                        # TIFF (big endian)
+    b"RIFF",                           # WebP header prefix
+)
+
+
+def validate_image_magic_bytes(header: bytes) -> bool:
+    """Validate raw binary stream header against known legitimate image signatures."""
+    if not header or len(header) < 2:
+        return False
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if header.startswith(b"\xff\xd8\xff"):
+        return True
+    if header.startswith(b"BM"):
+        return True
+    if header.startswith(b"II*\x00") or header.startswith(b"MM\x00*"):
+        return True
+    if header.startswith(b"RIFF") and len(header) >= 12 and header[8:12] == b"WEBP":
+        return True
+    return False
+
+
 def resolve_safe_image_path(directory: Path | None, filename: str | None) -> Path | None:
     if directory is None or not filename or not isinstance(filename, str):
+        return None
+    # Defense against null bytes and control characters
+    if "\x00" in filename or "\r" in filename or "\n" in filename:
         return None
     if Path(filename).name != filename:
         return None
 
     resolved_dir = directory.resolve()
     image_path = (resolved_dir / filename).resolve()
+
+    try:
+        # Commonpath verification prevents directory traversal via symlinks or Windows junctions
+        if os.path.commonpath([str(image_path), str(resolved_dir)]) != str(resolved_dir):
+            return None
+    except ValueError:
+        # Raised on Windows when paths are on different drive letters
+        return None
+
     if (
         image_path.parent != resolved_dir
         or not image_path.is_file()
@@ -496,9 +539,16 @@ def encode_query_image(
     if uploaded_file is not None:
         raw_name = getattr(uploaded_file, "filename", None) or "uploaded_query"
         query_name = Path(raw_name.replace("\\", "/")).name or "uploaded_query"
+        if "\x00" in query_name:
+            raise ValueError("Uploaded filename contains illegal null byte characters.")
+
         stream = getattr(uploaded_file, "stream", uploaded_file)
-        if hasattr(stream, "seek"):
+        if hasattr(stream, "seek") and hasattr(stream, "read"):
+            header = stream.read(16)
             stream.seek(0)
+            if not validate_image_magic_bytes(header):
+                raise ValueError("Uploaded file does not match a valid image magic byte signature.")
+
         try:
             with Image.open(uploaded_file) as img:
                 tensor = TRANSFORM_SAR(img.convert("L")).unsqueeze(0).to(DEVICE)

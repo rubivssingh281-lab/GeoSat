@@ -75,6 +75,13 @@ class ImagePathsDataset(torch.utils.data.Dataset):
         return self.transform(img), filename
 
 
+def safe_torch_load(path, map_location=None):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
 def cache_is_valid(files):
     if not os.path.exists(EMBEDDING_CACHE_PATH) or not os.path.exists(EMBEDDING_FILES_LIST):
         return False
@@ -96,7 +103,7 @@ def build_optical_database(optical_encoder, limit=None, refresh_cache=False):
 
     if not refresh_cache and cache_is_valid(files):
         print('Loading cached optical embeddings...')
-        embeddings = torch.load(EMBEDDING_CACHE_PATH, map_location='cpu')
+        embeddings = safe_torch_load(EMBEDDING_CACHE_PATH, map_location='cpu')
         return files, embeddings[:len(files)]
 
     print(f'Computing optical embeddings for {len(files)} images...')
@@ -133,8 +140,8 @@ def retrieve_top_k(query_sar_file, k=5, limit=None, refresh_cache=False, no_show
     sar_encoder = Encoder().to(DEVICE)
     optical_encoder = Encoder().to(DEVICE)
 
-    sar_encoder.load_state_dict(torch.load(SAR_MODEL, map_location=DEVICE))
-    optical_encoder.load_state_dict(torch.load(OPTICAL_MODEL, map_location=DEVICE))
+    sar_encoder.load_state_dict(safe_torch_load(SAR_MODEL, map_location=DEVICE))
+    optical_encoder.load_state_dict(safe_torch_load(OPTICAL_MODEL, map_location=DEVICE))
 
     sar_encoder.eval()
     optical_encoder.eval()
