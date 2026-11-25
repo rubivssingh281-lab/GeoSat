@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,12 @@ VALID_IMAGE_EXTENSIONS = frozenset({
 
 MAX_UPLOAD_MB = max(1, int(os.environ.get("GEOSAT_MAX_UPLOAD_MB", 25)))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-CORS_ALLOW_ORIGIN = os.environ.get("GEOSAT_CORS_ORIGINS", "*")
+CORS_ALLOW_ORIGINS_RAW = os.environ.get("GEOSAT_CORS_ORIGINS", "*").strip()
+ALLOWED_CORS_ORIGINS = {
+    origin.strip()
+    for origin in CORS_ALLOW_ORIGINS_RAW.split(",")
+    if origin.strip()
+}
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
@@ -149,29 +155,93 @@ def home():
     })
 
 
+@app.before_request
+def set_request_context() -> None:
+    request_id = request.headers.get("X-Request-ID")
+    if not request_id or len(request_id) > 128:
+        request_id = str(uuid.uuid4())
+    setattr(request, "request_id", request_id)
+
+
+def problem_response(
+    status: int,
+    title: str,
+    detail: str,
+    type_uri: str = "about:blank",
+    **extra: Any,
+):
+    """RFC 9457 Problem Details response builder with backward-compatible 'error' key."""
+    payload = {
+        "type": type_uri,
+        "title": title,
+        "status": status,
+        "detail": detail,
+        "instance": request.path,
+        "request_id": getattr(request, "request_id", None),
+        "error": detail,
+        **extra,
+    }
+    resp = jsonify(payload)
+    resp.status_code = status
+    resp.headers["Content-Type"] = "application/problem+json"
+    return resp
+
+
 @app.after_request
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = CORS_ALLOW_ORIGIN
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+def apply_security_and_cors_headers(response):
+    req_id = getattr(request, "request_id", None)
+    if req_id:
+        response.headers["X-Request-ID"] = req_id
+
+    # Strict Security Headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "img-src 'self' data: blob:; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "font-src 'self' https://cdn.jsdelivr.net; "
+        "script-src 'self' 'unsafe-inline'; "
+        "connect-src 'self' http://127.0.0.1:* http://localhost:*;"
+    )
+    response.headers["Permissions-Policy"] = (
+        "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
+        "magnetometer=(), microphone=(), payment=(), usb=()"
+    )
+
+    # CORS Origin Validation
+    origin = request.headers.get("Origin")
+    if "*" in ALLOWED_CORS_ORIGINS or CORS_ALLOW_ORIGINS_RAW == "*":
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    elif origin and origin in ALLOWED_CORS_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    elif not origin:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Request-ID, Authorization"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
 
 @app.errorhandler(404)
 def handle_not_found(_exc):
-    return jsonify({"error": "Endpoint not found."}), 404
+    return problem_response(404, "Not Found", "Endpoint not found.")
 
 
 @app.errorhandler(405)
 def handle_method_not_allowed(_exc):
-    return jsonify({"error": "Method not allowed."}), 405
+    return problem_response(405, "Method Not Allowed", "Method not allowed.")
 
 
 @app.errorhandler(413)
 def handle_payload_too_large(_exc):
-    return jsonify({
-        "error": f"Uploaded file exceeds maximum allowed size of {MAX_UPLOAD_MB} MB."
-    }), 413
+    return problem_response(
+        413,
+        "Payload Too Large",
+        f"Uploaded file exceeds maximum allowed size of {MAX_UPLOAD_MB} MB.",
+    )
 
 
 def _record_query_result(
@@ -744,7 +814,7 @@ def images(kind: str):
     elif kind == "optical":
         all_files = list_images(optical_dir)
     else:
-        return jsonify({"error": "kind must be 'sar' or 'optical'"}), 400
+        return problem_response(400, "Bad Request", "kind must be 'sar' or 'optical'")
 
     try:
         offset_arg = request.args.get("offset")
@@ -752,7 +822,7 @@ def images(kind: str):
         offset = _parse_int(offset_arg, "offset", min_value=0) if offset_arg is not None else 0
         limit = _parse_int(limit_arg, "limit", min_value=1) if limit_arg is not None else None
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        return problem_response(400, "Bad Request", str(exc))
 
     sliced = all_files[offset:offset + limit] if limit is not None else all_files[offset:]
     return jsonify({
@@ -771,11 +841,11 @@ def image(kind: str, filename: str):
     elif kind == "optical":
         directory = optical_dir
     else:
-        return jsonify({"error": "kind must be 'sar' or 'optical'"}), 400
+        return problem_response(400, "Bad Request", "kind must be 'sar' or 'optical'")
 
     image_path = resolve_safe_image_path(directory, filename)
     if image_path is None:
-        return jsonify({"error": "image not found"}), 404
+        return problem_response(404, "Not Found", "image not found")
 
     return send_file(image_path, conditional=True, max_age=3600)
 
@@ -789,12 +859,14 @@ def retrieve():
     allowed, retry_after = RATE_LIMITER.is_allowed()
     if not allowed:
         _record_query_result(success=False, rate_limited=True)
-        resp = jsonify({
-            "error": "Too many requests. Please slow down.",
-            "retry_after": retry_after,
-        })
+        resp = problem_response(
+            429,
+            "Too Many Requests",
+            "Too many requests. Please slow down.",
+            retry_after=retry_after,
+        )
         resp.headers["Retry-After"] = str(retry_after)
-        return resp, 429
+        return resp
 
     # Parse and validate inputs before starting query execution/metrics.
     try:
@@ -825,7 +897,7 @@ def retrieve():
         limit = _parse_limit(payload.get("limit", DEFAULT_LIMIT))
         refresh_cache = _parse_bool(payload.get("refresh_cache", False), "refresh_cache")
     except (TypeError, ValueError) as exc:
-        return jsonify({"error": str(exc)}), 400
+        return problem_response(400, "Bad Request", str(exc))
 
     started_at = time.perf_counter()
     try:
@@ -838,18 +910,18 @@ def retrieve():
         )
     except (TypeError, ValueError) as exc:
         _record_query_result(success=False)
-        return jsonify({"error": str(exc)}), 400
+        return problem_response(400, "Bad Request", str(exc))
     except FileNotFoundError as exc:
         _record_query_result(success=False)
-        return jsonify({"error": str(exc)}), 404
+        return problem_response(404, "Not Found", str(exc))
     except RuntimeError as exc:
         _record_query_result(success=False)
         logger.warning("Retrieval runtime error: %s", exc)
-        return jsonify({"error": str(exc)}), 500
+        return problem_response(500, "Internal Server Error", str(exc))
     except Exception:
         _record_query_result(success=False)
         logger.exception("Unexpected retrieval failure")
-        return jsonify({"error": "Internal server error during retrieval."}), 500
+        return problem_response(500, "Internal Server Error", "Internal server error during retrieval.")
 
     latency_ms = round((time.perf_counter() - started_at) * 1000, 2)
     _record_query_result(success=True, latency_ms=latency_ms)

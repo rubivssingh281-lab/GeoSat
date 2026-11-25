@@ -157,6 +157,25 @@
             .replaceAll("'", '&#039;');
     }
 
+    function sanitizeImageUrl(rawUrl) {
+        if (!rawUrl || typeof rawUrl !== 'string') return '';
+        const trimmed = rawUrl.trim();
+        // Allow relative endpoints hosted on our backend API
+        if (trimmed.startsWith('/') && !trimmed.startsWith('//')) {
+            return `${API_BASE}${encodeURI(trimmed)}`;
+        }
+        // Validate explicit web schemes to prevent javascript: / data: / vbscript: DOM XSS
+        try {
+            const parsed = new URL(trimmed);
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+                return parsed.href;
+            }
+        } catch {
+            return '';
+        }
+        return '';
+    }
+
     function showSearchError(message) {
         searchStatus.style.display = 'block';
         searchStatus.classList.add('error');
@@ -273,7 +292,8 @@
         currentResults.forEach((res, index) => {
             const score = res.match_percent || 0;
             const filename = escapeHtml(res.filename || 'unknown');
-            const imageUrl = res.image_url ? `${API_BASE}${encodeURI(res.image_url)}` : '#';
+            const safeUrl = sanitizeImageUrl(res.image_url);
+            const imageUrl = safeUrl || 'images/placeholder.svg';
             const sensor = 'Optical';
             const date = filename.match(/\d{4}-\d{2}-\d{2}/) ? filename.match(/\d{4}-\d{2}-\d{2}/)[0] : '2024-01-01';
             const coords = '—';
@@ -346,11 +366,11 @@
         // Populate viewer
         const filename = res.filename || 'unknown';
         const score = res.match_percent || 0;
-        const imageUrl = res.image_url ? `${API_BASE}${encodeURI(res.image_url)}` : '';
+        const safeUrl = sanitizeImageUrl(res.image_url);
 
         // Show image
-        if (imageUrl) {
-            vwImage.src = imageUrl;
+        if (safeUrl) {
+            vwImage.src = safeUrl;
             vwImage.style.display = 'block';
             vwImage.onerror = () => { vwImage.src = 'images/placeholder.svg'; };
         } else {
