@@ -37,6 +37,7 @@ GeoSat trains two ResNet18-based encoder networks — one for SAR imagery and on
 │   ├── flask_backend.py              # REST API server (port 5000)
 │   ├── train.py                      # Dual-encoder contrastive training
 │   ├── test_retrieval.py             # CLI retrieval evaluation script
+│   ├── test_security.py              # Automated cybersecurity test suite
 │   └── requirements.txt              # Backend dependencies
 ├── frontend/
 │   ├── index.html                    # Decoupled web interface
@@ -268,6 +269,41 @@ Optical DB ──►  Optical Encoder (ResNet18 + projection head) ──►  25
 ```
 
 Both encoders share the same architecture: a ResNet18 backbone with the classification head replaced by a two-layer MLP projection head (`512 → ReLU → 256`), followed by L2 normalisation. The contrastive loss is computed symmetrically across SAR-to-optical and optical-to-SAR directions.
+
+---
+
+## Cybersecurity & Hardening Architecture
+
+GeoSat implements enterprise-grade application security defenses to protect against OWASP Top 10 risks, model poisoning, and Denial of Service (DoS):
+
+### 1. Insecure Deserialization Defense
+- PyTorch checkpoint loading via `safe_torch_load` strictly enforces `weights_only=True` to prevent arbitrary Python bytecode execution (RCE) via malicious pickle payloads in model weights or embedding caches.
+
+### 2. File Upload Hardening & Pixel Flood Protection
+- **Magic-Byte Signature Verification**: Uploaded images are inspected for binary magic bytes (`PNG`, `JPEG`, `BMP`, `TIFF`, `WebP`) prior to PIL processing, preventing polyglot file uploads and script execution.
+- **Decompression Bomb Defense**: PIL `Image.MAX_IMAGE_PIXELS` is capped at 25,000,000 pixels with maximum payload upload body bounded to 25 MB (`GEOSAT_MAX_UPLOAD_MB`).
+
+### 3. Path Traversal & Null-Byte Neutralization
+- `resolve_safe_image_path` sanitizes image requests, rejects null bytes (`\x00`), and verifies real paths with `os.path.commonpath` to eliminate directory traversal (`../../`), junction escapes, and LFI vulnerabilities.
+
+### 4. Sliding Window Rate Limiting & Resource Exhaustion Defense
+- In-memory thread-safe `SlidingWindowRateLimiter` enforces rate limiting on `/api/retrieve` (configurable via `GEOSAT_RATE_LIMIT_PER_MINUTE`, default 60 req/min). Exceeded rates respond with HTTP `429 Too Many Requests` and standard `Retry-After` headers.
+
+### 5. Strict HTTP Security Headers & Origin Validation
+Every response includes hardened HTTP defense headers:
+- `X-Content-Type-Options: nosniff` (MIME confusion mitigation)
+- `X-Frame-Options: DENY` (Clickjacking defense)
+- `Referrer-Policy: strict-origin-when-cross-origin`
+- `Content-Security-Policy` (Restricting scripts, styles, fonts, and connect origins)
+- `Permissions-Policy` (Disabling camera, microphone, geolocation, and USB APIs)
+- `X-Request-ID` (UUID correlation tracing across queries)
+- Configurable CORS origin validation (`GEOSAT_CORS_ORIGINS`).
+
+### 6. RFC 9457 Problem Details Contract
+- All HTTP errors conform to RFC 9457 (`application/problem+json`) with standard `type`, `title`, `status`, `detail`, `instance`, and `request_id` keys, retaining backward compatibility for client consumers.
+
+### 7. Frontend DOM XSS Protection
+- The frontend strictly sanitizes all search result image URLs, allowing only internal relative paths and explicit `http:`/`https:` web protocols, neutralizing `javascript:` or `data:` protocol injection.
 
 ---
 
