@@ -72,8 +72,57 @@ QUERY_METRICS: dict[str, Any] = {
     "total_queries": 0,
     "successful_queries": 0,
     "failed_queries": 0,
+    "rate_limited_queries": 0,
     "recent_latency_ms": deque(maxlen=50),
 }
+
+
+class SlidingWindowRateLimiter:
+    """Thread-safe sliding-window in-memory rate limiter per client IP."""
+
+    def __init__(self, requests_per_minute: int = 60, window_seconds: float = 60.0):
+        self.requests_per_minute = requests_per_minute
+        self.window_seconds = window_seconds
+        self._clients: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def get_client_ip() -> str:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
+            if client_ip:
+                return client_ip
+        return request.remote_addr or "127.0.0.1"
+
+    def is_allowed(self, client_ip: str | None = None) -> tuple[bool, int]:
+        if self.requests_per_minute <= 0:
+            return True, 0
+
+        ip = client_ip or self.get_client_ip()
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+
+        with self._lock:
+            q = self._clients.setdefault(ip, deque())
+            while q and q[0] <= cutoff:
+                q.popleft()
+
+            if len(q) >= self.requests_per_minute:
+                oldest = q[0]
+                retry_after = max(1, int(oldest + self.window_seconds - now + 0.5))
+                return False, retry_after
+
+            q.append(now)
+            return True, 0
+
+    def reset(self) -> None:
+        with self._lock:
+            self._clients.clear()
+
+
+RATE_LIMIT_PER_MINUTE = max(0, int(os.environ.get("GEOSAT_RATE_LIMIT_PER_MINUTE", 60)))
+RATE_LIMITER = SlidingWindowRateLimiter(requests_per_minute=RATE_LIMIT_PER_MINUTE)
 
 
 TRANSFORM_SAR = transforms.Compose([
@@ -125,10 +174,17 @@ def handle_payload_too_large(_exc):
     }), 413
 
 
-def _record_query_result(success: bool, latency_ms: float | None = None) -> None:
+def _record_query_result(
+    success: bool,
+    latency_ms: float | None = None,
+    rate_limited: bool = False,
+) -> None:
     with _METRICS_LOCK:
         QUERY_METRICS["total_queries"] += 1
-        if success:
+        if rate_limited:
+            QUERY_METRICS["rate_limited_queries"] += 1
+            QUERY_METRICS["failed_queries"] += 1
+        elif success:
             QUERY_METRICS["successful_queries"] += 1
             if latency_ms is not None:
                 QUERY_METRICS["recent_latency_ms"].append(latency_ms)
@@ -142,11 +198,13 @@ def metrics_snapshot() -> dict[str, Any]:
         total = QUERY_METRICS["total_queries"]
         successful = QUERY_METRICS["successful_queries"]
         failed = QUERY_METRICS["failed_queries"]
+        rate_limited = QUERY_METRICS["rate_limited_queries"]
 
     return {
         "total_queries": total,
         "successful_queries": successful,
         "failed_queries": failed,
+        "rate_limited_queries": rate_limited,
         "average_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else None,
         "last_latency_ms": latencies[-1] if latencies else None,
     }
@@ -672,6 +730,8 @@ def status():
         "embedding_dimension": EMBEDDING_DIM,
         "batch_size": BATCH_SIZE,
         "framework": "PyTorch",
+        "rate_limit_per_minute": RATE_LIMITER.requests_per_minute,
+        "rate_limited_queries": QUERY_METRICS["rate_limited_queries"],
     })
 
 
@@ -724,6 +784,17 @@ def image(kind: str, filename: str):
 def retrieve():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"})
+
+    # Resource exhaustion defense: sliding window rate limiter
+    allowed, retry_after = RATE_LIMITER.is_allowed()
+    if not allowed:
+        _record_query_result(success=False, rate_limited=True)
+        resp = jsonify({
+            "error": "Too many requests. Please slow down.",
+            "retry_after": retry_after,
+        })
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp, 429
 
     # Parse and validate inputs before starting query execution/metrics.
     try:
